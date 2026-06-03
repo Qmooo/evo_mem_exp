@@ -112,12 +112,21 @@ class ToolBenchDataset(SingleTurnDataset):
                 data = json.load(f)
 
             for idx, item in enumerate(data):
+                funcs = item.get("functions", [])
+                func_lines = [
+                    f"- {f.get('name', '?')}: {f.get('description', '')}"
+                    for f in funcs[:5]
+                    if isinstance(f, dict)
+                ]
+                full_input = item["question"]
+                if func_lines:
+                    full_input += "\n\nAvailable APIs:\n" + "\n".join(func_lines)
                 instances.append(TaskInstance(
                     task_id=f"toolbench_{idx}",
-                    input_text=item["question"],
+                    input_text=full_input,
                     target=item.get("answer", ""),
-                    metadata=item.get("metadata", {}),
-                    domain="api",
+                    metadata={"functions": funcs, "category": item.get("category", "general")},
+                    domain=item.get("category", "api"),
                 ))
 
         except FileNotFoundError:

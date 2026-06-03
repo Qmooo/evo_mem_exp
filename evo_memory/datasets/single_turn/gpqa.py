@@ -107,11 +107,18 @@ class GPQADataset(SingleTurnDataset):
                 data = json.load(f)
 
             for idx, item in enumerate(data):
+                question = item["question"]
+                options = item.get("options", [])
+                if options:
+                    opts_text = "\n".join(
+                        f"{chr(65 + i)}. {o}" for i, o in enumerate(options)
+                    )
+                    question = f"{question}\n\nOptions:\n{opts_text}"
                 instances.append(TaskInstance(
                     task_id=f"gpqa_{self.subset}_{idx}",
-                    input_text=item["question"],
+                    input_text=question,
                     target=item.get("answer", ""),
-                    metadata=item.get("metadata", {}),
+                    metadata={"options": options},
                     domain=item.get("domain", "science"),
                     difficulty="hard",
                 ))

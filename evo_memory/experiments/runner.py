@@ -51,14 +51,14 @@ logger = logging.getLogger(__name__)
 # Agent registry
 AGENT_REGISTRY: Dict[AgentType, Type[BaseAgent]] = {
     AgentType.EXPRAG: ExpRAGAgent,
-    AgentType.EXP_RECENT: ExpRecentAgent,
+    AgentType.EXPRECENT: ExpRecentAgent,
     AgentType.REMEM: ReMemAgent,
     AgentType.REACT: ReActAgent,
     AgentType.AMEM: AmemAgent,
     AgentType.SELFRAG: SelfRAGAgent,
     AgentType.MEM0: Mem0Agent,
     AgentType.LANGMEM: LangMemAgent,
-    AgentType.DYNAMIC_CHEATSHEET: DynamicCheatsheetAgent,
+    AgentType.DC_CU: DynamicCheatsheetAgent,
     AgentType.AWM: AWMAgent,
 }
 
@@ -66,8 +66,8 @@ AGENT_REGISTRY: Dict[AgentType, Type[BaseAgent]] = {
 DATASET_REGISTRY: Dict[DatasetType, Type[BaseDataset]] = {
     DatasetType.MMLU_PRO: MMLUProDataset,
     DatasetType.GPQA: GPQADataset,
-    DatasetType.AIME24: AIMEDataset,
-    DatasetType.AIME25: AIMEDataset,
+    DatasetType.AIME_24: AIMEDataset,
+    DatasetType.AIME_25: AIMEDataset,
     DatasetType.TOOLBENCH: ToolBenchDataset,
     DatasetType.ALFWORLD: AlfWorldDataset,
     DatasetType.BABYAI: BabyAIDataset,
@@ -189,7 +189,7 @@ class ExperimentRunner:
 
     def _create_retriever(self):
         """Create retriever instance."""
-        if self.config.agent_type == AgentType.EXP_RECENT:
+        if self.config.agent_type == AgentType.EXPRECENT:
             return RecencyRetriever(top_k=self.config.retrieval_k)
         else:
             return EmbeddingRetriever(top_k=self.config.retrieval_k)
@@ -222,9 +222,9 @@ class ExperimentRunner:
             kwargs["data_path"] = self.config.dataset_path
 
         # Handle AIME year variants
-        if self.config.dataset_type == DatasetType.AIME24:
+        if self.config.dataset_type == DatasetType.AIME_24:
             kwargs["year"] = 2024
-        elif self.config.dataset_type == DatasetType.AIME25:
+        elif self.config.dataset_type == DatasetType.AIME_25:
             kwargs["year"] = 2025
 
         return dataset_cls(**kwargs)
