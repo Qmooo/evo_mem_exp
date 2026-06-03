@@ -104,7 +104,7 @@ def download_aime(output_dir: Path, year: int = 2024):
     print(f"\n[3/4] Downloading AIME {year} dataset...")
 
     try:
-        dataset_name = f"AI-MO/aime_{year}"
+        dataset_name = f"HuggingFaceH4/aime_{year}"
         dataset = load_dataset(dataset_name, split="train")
 
         data = []
@@ -190,33 +190,91 @@ def download_aime(output_dir: Path, year: int = 2024):
         return len(sample_problems)
 
 
+def _bfcl_call_to_json(call_str: str) -> dict:
+    """Convert 'func(a=1, b=1/6)' to {"name": "func", "arguments": {"a": 1, "b": 0.1667}}."""
+    import ast
+
+    def _eval_node(node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -_eval_node(node.operand)
+        if isinstance(node, ast.BinOp):
+            left, right = _eval_node(node.left), _eval_node(node.right)
+            ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
+                   ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b}
+            op_fn = ops.get(type(node.op))
+            if op_fn:
+                return op_fn(left, right)
+        raise ValueError(f"unsupported node: {ast.dump(node)}")
+
+    try:
+        tree = ast.parse(call_str.strip(), mode="eval")
+        call = tree.body
+        if not isinstance(call, ast.Call):
+            return {"name": call_str, "arguments": {}}
+        name = call.func.id if isinstance(call.func, ast.Name) else ast.unparse(call.func)
+        args = {}
+        for kw in call.keywords:
+            try:
+                args[kw.arg] = _eval_node(kw.value)
+            except Exception:
+                args[kw.arg] = ast.unparse(kw.value)
+        for i, arg in enumerate(call.args):
+            try:
+                args[f"_arg{i}"] = _eval_node(arg)
+            except Exception:
+                args[f"_arg{i}"] = ast.unparse(arg)
+        return {"name": name, "arguments": args}
+    except Exception:
+        return {"name": call_str, "arguments": {}}
+
+
 def download_toolbench(output_dir: Path):
-    """Download ToolBench/Berkeley Function Calling dataset."""
-    from datasets import load_dataset
+    """Download ToolBench/Berkeley Function Calling dataset (exec_simple + exec_multiple).
+
+    Only these two categories are compatible with evo_mem's single-call evaluate():
+    - exec_simple (100):  one correct function from one candidate
+    - exec_multiple (50): one correct function from multiple candidates
+    exec_parallel/exec_parallel_multiple require predicting multiple simultaneous calls
+    and are incompatible with the current API/Acc metric.
+    """
+    from huggingface_hub import hf_hub_download
 
     print("\n[4/4] Downloading ToolBench/Berkeley Function Calling dataset...")
 
+    BFCL_FILES = [
+        ("BFCL_v3_exec_simple.json",   "simple"),
+        ("BFCL_v3_exec_multiple.json", "multiple"),
+    ]
+
     try:
-        dataset = load_dataset(
-            "gorilla-llm/Berkeley-Function-Calling-Leaderboard",
-            split="train"
-        )
-
         data = []
-        for item in tqdm(dataset, desc="Processing ToolBench"):
-            question = item.get("question", "")
-            if not question:
-                continue
+        for filename, category in BFCL_FILES:
+            path = hf_hub_download(
+                repo_id="gorilla-llm/Berkeley-Function-Calling-Leaderboard",
+                filename=filename,
+                repo_type="dataset",
+            )
+            with open(path) as f:
+                raw_data = [json.loads(line) for line in f if line.strip()]
 
-            ground_truth = item.get("ground_truth", item.get("answer", ""))
-            functions = item.get("functions", [])
+            for item in tqdm(raw_data, desc=f"Processing {category}"):
+                turns = item.get("question", [])
+                user_content = turns[0][0]["content"] if turns and turns[0] else ""
+                if not user_content:
+                    continue
 
-            data.append({
-                "question": question,
-                "answer": ground_truth if isinstance(ground_truth, str) else json.dumps(ground_truth),
-                "functions": functions,
-                "category": item.get("category", "general"),
-            })
+                ground_truth = item.get("ground_truth", [])
+                # Convert Python call string → {"name":..., "arguments":{...}}
+                answer = json.dumps(_bfcl_call_to_json(ground_truth[0])) if ground_truth else ""
+
+                data.append({
+                    "question": user_content,
+                    "answer": answer,
+                    "functions": item.get("function", []),
+                    "category": category,
+                })
 
         output_file = output_dir / "toolbench.json"
         with open(output_file, "w") as f:
