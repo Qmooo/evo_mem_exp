@@ -208,90 +208,60 @@ def download_aime(output_dir: Path, year: int = 2024):
         return len(sample_problems)
 
 
-def _bfcl_call_to_json(call_str: str) -> dict:
-    """Convert 'func(a=1, b=1/6)' to {"name": "func", "arguments": {"a": 1, "b": 0.1667}}."""
-    import ast
-
-    def _eval_node(node):
-        if isinstance(node, ast.Constant):
-            return node.value
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return -_eval_node(node.operand)
-        if isinstance(node, ast.BinOp):
-            left, right = _eval_node(node.left), _eval_node(node.right)
-            ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
-                   ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b}
-            op_fn = ops.get(type(node.op))
-            if op_fn:
-                return op_fn(left, right)
-        raise ValueError(f"unsupported node: {ast.dump(node)}")
-
-    try:
-        tree = ast.parse(call_str.strip(), mode="eval")
-        call = tree.body
-        if not isinstance(call, ast.Call):
-            return {"name": call_str, "arguments": {}}
-        name = call.func.id if isinstance(call.func, ast.Name) else ast.unparse(call.func)
-        args = {}
-        for kw in call.keywords:
-            try:
-                args[kw.arg] = _eval_node(kw.value)
-            except Exception:
-                args[kw.arg] = ast.unparse(kw.value)
-        for i, arg in enumerate(call.args):
-            try:
-                args[f"_arg{i}"] = _eval_node(arg)
-            except Exception:
-                args[f"_arg{i}"] = ast.unparse(arg)
-        return {"name": name, "arguments": args}
-    except Exception:
-        return {"name": call_str, "arguments": {}}
-
-
 def download_toolbench(output_dir: Path):
-    """Download ToolBench/Berkeley Function Calling dataset (exec_simple + exec_multiple).
+    """Download BFCL v4 simple_python + multiple from GitHub.
 
-    Only these two categories are compatible with evo_mem's single-call evaluate():
-    - exec_simple (100):  one correct function from one candidate
-    - exec_multiple (50): one correct function from multiple candidates
-    exec_parallel/exec_parallel_multiple require predicting multiple simultaneous calls
-    and are incompatible with the current API/Acc metric.
+    Data:    github.com/ShishirPatil/gorilla main/berkeley-function-call-leaderboard/bfcl_eval/data/
+    GT:      …/possible_answer/  (merged by id)
+
+    Output format per item:
+      {id, question (plain str), function (list), ground_truth ([{func: {param: [vals]}}]), category}
     """
-    from huggingface_hub import hf_hub_download
+    import urllib.request
 
-    print("\n[4/4] Downloading ToolBench/Berkeley Function Calling dataset...")
+    print("\n[4/4] Downloading BFCL v4 (simple_python + multiple) from GitHub...")
 
-    BFCL_FILES = [
-        ("BFCL_v3_exec_simple.json",   "simple"),
-        ("BFCL_v3_exec_multiple.json", "multiple"),
-    ]
+    GITHUB_BASE = (
+        "https://raw.githubusercontent.com/ShishirPatil/gorilla"
+        "/main/berkeley-function-call-leaderboard/bfcl_eval/data"
+    )
+    CATEGORIES = ["simple_python", "multiple"]
+
+    def fetch_jsonl(url: str):
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            raw = resp.read().decode("utf-8").strip()
+        if raw.startswith("["):
+            return json.loads(raw)
+        return [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+    def extract_question(q):
+        if isinstance(q, str):
+            return q
+        if isinstance(q, list) and q:
+            turn = q[0]
+            if isinstance(turn, list) and turn:
+                msg = turn[0]
+                return msg.get("content", "") if isinstance(msg, dict) else ""
+        return ""
 
     try:
         data = []
-        for filename, category in BFCL_FILES:
-            path = hf_hub_download(
-                repo_id="gorilla-llm/Berkeley-Function-Calling-Leaderboard",
-                filename=filename,
-                repo_type="dataset",
-            )
-            with open(path) as f:
-                raw_data = [json.loads(line) for line in f if line.strip()]
+        for cat in CATEGORIES:
+            items = fetch_jsonl(f"{GITHUB_BASE}/BFCL_v4_{cat}.json")
+            gt_items = fetch_jsonl(f"{GITHUB_BASE}/possible_answer/BFCL_v4_{cat}.json")
+            gt_map = {item["id"]: item.get("ground_truth", []) for item in gt_items}
 
-            for item in tqdm(raw_data, desc=f"Processing {category}"):
-                turns = item.get("question", [])
-                user_content = turns[0][0]["content"] if turns and turns[0] else ""
-                if not user_content:
+            for item in tqdm(items, desc=f"Processing {cat}"):
+                question = extract_question(item.get("question", ""))
+                if not question:
                     continue
-
-                ground_truth = item.get("ground_truth", [])
-                # Convert Python call string → {"name":..., "arguments":{...}}
-                answer = json.dumps(_bfcl_call_to_json(ground_truth[0])) if ground_truth else ""
-
+                item_id = item.get("id", "")
                 data.append({
-                    "question": user_content,
-                    "answer": answer,
-                    "functions": item.get("function", []),
-                    "category": category,
+                    "id": item_id,
+                    "question": question,
+                    "function": item.get("function", []),
+                    "ground_truth": gt_map.get(item_id, []),
+                    "category": cat,
                 })
 
         output_file = output_dir / "toolbench.json"
@@ -302,55 +272,23 @@ def download_toolbench(output_dir: Path):
         return len(data)
 
     except Exception as e:
-        print(f"  ✗ Failed to download ToolBench: {e}")
+        print(f"  ✗ Failed to download BFCL v4: {e}")
 
-        # Create sample tasks as fallback
         print("  Creating sample ToolBench tasks...")
         sample_tasks = [
             {
-                "question": "What's the weather like in San Francisco today?",
-                "functions": [
-                    {"name": "get_weather", "description": "Get current weather for a location", "parameters": {"location": "string"}},
-                    {"name": "search_web", "description": "Search the web for information", "parameters": {"query": "string"}},
-                ],
-                "answer": '{"name": "get_weather", "arguments": {"location": "San Francisco"}}',
-                "category": "weather",
+                "id": "simple_python_0",
+                "question": "Find the area of a triangle with a base of 10 units and height of 5 units.",
+                "function": [{"name": "calculate_triangle_area", "description": "Calculate the area of a triangle given its base and height.", "parameters": {"type": "dict", "properties": {"base": {"type": "integer", "description": "The base of the triangle."}, "height": {"type": "integer", "description": "The height of the triangle."}, "unit": {"type": "string", "description": "The unit of measure (defaults to 'units' if not specified)"}}, "required": ["base", "height"]}}],
+                "ground_truth": [{"calculate_triangle_area": {"base": [10], "height": [5], "unit": ["units", ""]}}],
+                "category": "simple_python",
             },
             {
-                "question": "Send an email to john@example.com with subject 'Meeting Tomorrow'",
-                "functions": [
-                    {"name": "send_email", "description": "Send an email", "parameters": {"to": "string", "subject": "string", "body": "string"}},
-                    {"name": "create_calendar_event", "description": "Create a calendar event", "parameters": {"title": "string", "time": "string"}},
-                ],
-                "answer": '{"name": "send_email", "arguments": {"to": "john@example.com", "subject": "Meeting Tomorrow"}}',
-                "category": "email",
-            },
-            {
-                "question": "Create a reminder to call mom at 5pm",
-                "functions": [
-                    {"name": "set_reminder", "description": "Set a reminder", "parameters": {"message": "string", "time": "string"}},
-                    {"name": "add_todo", "description": "Add a todo item", "parameters": {"task": "string"}},
-                ],
-                "answer": '{"name": "set_reminder", "arguments": {"message": "call mom", "time": "5pm"}}',
-                "category": "reminder",
-            },
-            {
-                "question": "Search for Italian restaurants near me",
-                "functions": [
-                    {"name": "search_restaurants", "description": "Search for restaurants", "parameters": {"cuisine": "string", "location": "string"}},
-                    {"name": "get_directions", "description": "Get directions to a place", "parameters": {"destination": "string"}},
-                ],
-                "answer": '{"name": "search_restaurants", "arguments": {"cuisine": "Italian", "location": "near me"}}',
-                "category": "search",
-            },
-            {
-                "question": "Play some jazz music",
-                "functions": [
-                    {"name": "play_music", "description": "Play music", "parameters": {"genre": "string", "artist": "string"}},
-                    {"name": "set_volume", "description": "Set audio volume", "parameters": {"level": "integer"}},
-                ],
-                "answer": '{"name": "play_music", "arguments": {"genre": "jazz"}}',
-                "category": "music",
+                "id": "simple_python_1",
+                "question": "Calculate the factorial of 5 using math functions.",
+                "function": [{"name": "math.factorial", "description": "Calculate the factorial of a given number.", "parameters": {"type": "dict", "properties": {"number": {"type": "integer", "description": "The number for which factorial needs to be calculated."}}, "required": ["number"]}}],
+                "ground_truth": [{"math.factorial": {"number": [5]}}],
+                "category": "simple_python",
             },
         ]
 
