@@ -98,22 +98,40 @@ def download_gpqa(output_dir: Path):
 
 
 def download_aime(output_dir: Path, year: int = 2024):
-    """Download AIME dataset from HuggingFace."""
+    """Download AIME dataset from MathArena on HuggingFace.
+
+    2024 is split into two separate repos (I and II) that are merged.
+    2025 and 2026 are available as single combined repos.
+    """
     from datasets import load_dataset
 
     print(f"\n[3/4] Downloading AIME {year} dataset...")
 
-    try:
-        dataset_name = f"HuggingFaceH4/aime_{year}"
-        dataset = load_dataset(dataset_name, split="train")
+    # MathArena is the authoritative source for all years
+    DATASET_SOURCES = {
+        2024: ["MathArena/aime_2024_I", "MathArena/aime_2024_II"],
+        2025: ["MathArena/aime_2025"],
+        2026: ["MathArena/aime_2026"],
+    }
 
+    try:
+        sources = DATASET_SOURCES.get(year, [f"MathArena/aime_{year}"])
         data = []
-        for item in tqdm(dataset, desc=f"Processing AIME {year}"):
-            data.append({
-                "problem": item.get("problem", item.get("question", "")),
-                "answer": str(item.get("answer", item.get("solution", ""))),
-                "year": year,
-            })
+        for dataset_name in sources:
+            dataset = load_dataset(dataset_name, split="train")
+            part_label = dataset_name.split("_")[-1] if len(sources) > 1 else None
+            for item in tqdm(dataset, desc=f"Processing {dataset_name}"):
+                entry = {
+                    "problem": item.get("problem", ""),
+                    "answer": str(item.get("answer", "")),
+                    "year": year,
+                    "problem_idx": item.get("problem_idx"),
+                }
+                if part_label in ("I", "II"):
+                    entry["part"] = part_label
+                if "problem_type" in item:
+                    entry["problem_type"] = item["problem_type"]
+                data.append(entry)
 
         output_file = output_dir / f"aime_{year}.json"
         with open(output_file, "w") as f:
@@ -426,7 +444,9 @@ def main():
         total_samples += download_gpqa(output_dir)
 
     if "aime" in datasets_to_download:
-        total_samples += download_aime(output_dir)
+        total_samples += download_aime(output_dir, year=2024)
+        total_samples += download_aime(output_dir, year=2025)
+        total_samples += download_aime(output_dir, year=2026)
 
     if "toolbench" in datasets_to_download:
         total_samples += download_toolbench(output_dir)

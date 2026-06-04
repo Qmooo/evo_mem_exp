@@ -16,24 +16,24 @@ class AIMEDataset(SingleTurnDataset):
     AIME dataset for mathematical problem solving.
 
     Contains challenging math problems with exact-match evaluation.
-    Supports AIME-24 and AIME-25 from the paper.
+    Supports AIME 2024, 2025, and 2026 via MathArena on HuggingFace.
+    2024 is split into two separate repos (I and II) that are merged.
     """
+
+    # MathArena is the authoritative source for all years
+    _HF_SOURCES: dict = {
+        2024: ["MathArena/aime_2024_I", "MathArena/aime_2024_II"],
+        2025: ["MathArena/aime_2025"],
+        2026: ["MathArena/aime_2026"],
+    }
 
     def __init__(
         self,
         data_path: Optional[str] = None,
         split: DatasetSplit = DatasetSplit.TEST,
-        year: int = 2024,  # 2024 or 2025
+        year: int = 2024,  # 2024, 2025, or 2026
         **kwargs,
     ):
-        """
-        Initialize AIME dataset.
-
-        Args:
-            data_path: Path to AIME data
-            split: Dataset split
-            year: AIME year (2024 or 2025)
-        """
         super().__init__(data_path, split, **kwargs)
         self.year = year
 
@@ -42,38 +42,40 @@ class AIMEDataset(SingleTurnDataset):
         return f"aime_{self.year}"
 
     def _load_data(self) -> List[TaskInstance]:
-        """Load AIME data."""
+        """Load AIME data from MathArena (HuggingFace), falling back to local JSON."""
         instances = []
 
         try:
             from datasets import load_dataset
 
-            # Load from HuggingFace
-            dataset_name = f"HuggingFaceH4/aime_{self.year}"
-            dataset = load_dataset(dataset_name, split="train")
-
-            for idx, item in enumerate(dataset):
-                problem = item.get("problem", item.get("question", ""))
-                answer = str(item.get("answer", item.get("solution", "")))
-
-                instances.append(TaskInstance(
-                    task_id=f"aime_{self.year}_{idx}",
-                    input_text=problem,
-                    target=answer,
-                    metadata={
-                        "year": self.year,
-                        "problem_number": idx + 1,
-                    },
-                    domain="mathematics",
-                    difficulty=self._estimate_difficulty(idx),
-                ))
+            sources = self._HF_SOURCES.get(self.year, [f"MathArena/aime_{self.year}"])
+            idx = 0
+            for dataset_name in sources:
+                dataset = load_dataset(dataset_name, split="train")
+                part = dataset_name.split("_")[-1] if len(sources) > 1 else None
+                for item in dataset:
+                    problem = item.get("problem", "")
+                    answer = str(item.get("answer", ""))
+                    metadata = {"year": self.year, "problem_number": idx + 1}
+                    if part in ("I", "II"):
+                        metadata["part"] = part
+                    if "problem_type" in item:
+                        metadata["problem_type"] = item["problem_type"]
+                    instances.append(TaskInstance(
+                        task_id=f"aime_{self.year}_{idx}",
+                        input_text=problem,
+                        target=answer,
+                        metadata=metadata,
+                        domain="mathematics",
+                        difficulty=self._estimate_difficulty(idx),
+                    ))
+                    idx += 1
 
         except Exception as e:
             print(f"Warning: Could not load AIME from HuggingFace: {e}")
             if self.data_path:
                 instances = self._load_from_local()
             else:
-                # Create sample problems for testing
                 instances = self._create_sample_problems()
 
         return instances
