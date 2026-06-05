@@ -1,331 +1,263 @@
-"""ScienceWorld dataset loader.
+"""ScienceWorld dataset – AgentBoard env class + evo_mem streaming adapter.
 
-ScienceWorld features open-ended scientific experimentation tasks,
-testing reasoning about physical and chemical processes.
+Requires:
+    pip install scienceworld==1.2.3
+
+Data path (set via env var or pass data_path=):
+    AGENTBOARD_DATA_PATH=/path/to/agentboard/data
+    → expects $AGENTBOARD_DATA_PATH/scienceworld/test.jsonl
+
+Goal→(task_name, var_idx) mapping is built lazily and cached to
+$AGENTBOARD_DATA_PATH/scienceworld/goal_map.json on first run (~2 min).
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from __future__ import annotations
+
 import json
-from dataclasses import dataclass
+import os
+import random
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..base import MultiTurnDataset, TaskInstance, DatasetSplit
+import jsonlines
+
+from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
+
+_AGENTBOARD_DEFAULT = os.environ.get(
+    "AGENTBOARD_DATA_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "data", "agentboard", "data"),
+)
 
 
-class ScienceWorldEnvironment:
+def _build_goal_map(data_dir: str) -> Dict[str, Tuple[str, int]]:
+    """Build goal_text → (task_name, var_idx) by iterating all ScienceWorld test variations.
+
+    Results are cached to goal_map.json in data_dir. This may take ~2 minutes on first run.
     """
-    Simulated ScienceWorld environment.
+    cache_path = os.path.join(data_dir, "goal_map.json")
+    if os.path.exists(cache_path):
+        with open(cache_path) as f:
+            raw = json.load(f)
+        return {k: tuple(v) for k, v in raw.items()}
 
-    Implements simplified science experiment scenarios.
-    """
+    from scienceworld import ScienceWorldEnv
 
-    def __init__(self, task: TaskInstance):
-        self.task = task
-        self.task_type = task.metadata.get("task_type", "general")
-        self.step_count = 0
-        self.max_steps = 50
+    goal_map: Dict[str, Tuple[str, int]] = {}
+    dummy = ScienceWorldEnv("boil", envStepLimit=1)
+    task_names = dummy.getTaskNames()
 
-        # Environment state
-        self.inventory = []
-        self.current_location = "lab"
-        self.objects = self._initialize_objects()
-        self.experiment_state = {}
+    for task_name in task_names:
+        env = ScienceWorldEnv(task_name, envStepLimit=1)
+        for var_idx in env.getVariationsTest():
+            env.load(task_name, var_idx)
+            env.reset()
+            goal = env.getTaskDescription().strip()
+            if goal not in goal_map:
+                goal_map[goal] = (task_name, var_idx)
 
-    def _initialize_objects(self) -> Dict[str, Dict]:
-        """Initialize objects based on task."""
-        base_objects = {
-            "thermometer": {"location": "lab", "type": "tool"},
-            "beaker": {"location": "lab", "type": "container", "contains": None},
-            "bunsen_burner": {"location": "lab", "type": "heat_source", "state": "off"},
-            "ice": {"location": "freezer", "type": "substance", "state": "solid", "temp": 0},
-            "water": {"location": "sink", "type": "substance", "state": "liquid", "temp": 20},
-            "plant": {"location": "greenhouse", "type": "living", "state": "healthy"},
-            "soil": {"location": "greenhouse", "type": "substance"},
-            "seed": {"location": "storage", "type": "living", "state": "dormant"},
-        }
-        return base_objects
+    with open(cache_path, "w") as f:
+        json.dump(goal_map, f, indent=2)
+    return goal_map
 
-    def reset(self) -> str:
-        """Reset environment."""
-        self.step_count = 0
-        self.inventory = []
-        self.current_location = "lab"
-        self.objects = self._initialize_objects()
-        self.experiment_state = {}
 
-        return self._get_observation()
+# ─────────────────────────────────────────────────────────────────────────────
+# AgentBoard Scienceworld environment class (copied; registry/pdb/
+# label_path loading stripped; from_config removed)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def _get_observation(self) -> str:
-        """Get current observation."""
-        parts = [f"Task: {self.task.input_text}"]
-        parts.append(f"Location: {self.current_location}")
+class Scienceworld:
+    def __init__(self,
+                 serverPath=None,
+                 envStepLimit=100,
+                 label_path=''
+                 ):
+        from scienceworld import ScienceWorldEnv
+        self.env = ScienceWorldEnv("", serverPath, envStepLimit=envStepLimit)
+        self.reward = 0.
+        self.done = False
+        self.label_path = label_path
+        self.labels = {}
+        self.cur_label = None
+        self.modified_goal = ''
+        self.selected_obs = ''
+        self.finished_sub_goal = []
+        if label_path:
+            with open(self.label_path, 'r+', encoding='utf-8') as f:
+                for item in jsonlines.Reader(f):
+                    task_name = item["additional_info"]["env_name"]
+                    var = item["additional_info"]["var"]
+                    self.labels[f"{task_name}_{var}"] = {
+                        "task_name": task_name,
+                        "var": var,
+                        "modified_goal": item["goal"],
+                        "subgoals": item['subgoals'],
+                        "difficulty": item["difficulty"],
+                    }
 
-        # Objects in current location
-        visible = [name for name, obj in self.objects.items()
-                  if obj.get("location") == self.current_location]
-        if visible:
-            parts.append(f"You see: {', '.join(visible)}")
+    def load(self, task_name, var, simplificationStr):
+        env = self.env.load(task_name, var, simplificationStr=simplificationStr)
+        if self.labels:
+            self.cur_label = self.labels.get(f"{task_name}_{var}")
+            if self.cur_label:
+                self.selected_obs = self.cur_label["subgoals"]
+                self.modified_goal = self.cur_label["modified_goal"]
+                self.difficulty = self.cur_label["difficulty"]
+                self.finished_sub_goal = [0 for i in range(len(self.selected_obs))]
+        return env
 
-        if self.inventory:
-            parts.append(f"Inventory: {', '.join(self.inventory)}")
+    def inventory(self):
+        return self.env.inventory()
 
-        if self.experiment_state:
-            parts.append(f"Experiment: {self.experiment_state}")
+    def parseAction(self, action):
+        action = action.strip()
+        return action
 
-        return " | ".join(parts)
+    def step(self, action):
+        action = self.parseAction(action)
+        observation = ''
+        if action == "check valid actions":
+            valid_actions = ", ".join(self.get_action_space())
+            observation = f"Choose an action from these valid actions: {valid_actions}"
+            return observation, self.reward, self.done, None
+        else:
+            observation, _, _, info = self.env.step(action)
+            if self.selected_obs:
+                self._check_temperature_string(observation, self.selected_obs)
+            self.reward = self.get_reward()
+            self.done = self._check_is_done(self.selected_obs) if self.selected_obs else False
+            return observation, self.reward, self.done, info
 
-    def step(self, action: str) -> Tuple[str, float, bool, Dict]:
-        """Execute action."""
-        self.step_count += 1
-        action_lower = action.lower().strip()
-
-        if self.step_count >= self.max_steps:
-            return "Max steps reached.", 0.0, True, {"success": False, "progress": 0.3}
-
-        reward = 0.0
-        done = False
-        obs = "Nothing happens."
-
-        # Go to location
-        if action_lower.startswith("go to"):
-            location = action_lower.replace("go to", "").strip()
-            valid_locations = ["lab", "greenhouse", "storage", "sink", "freezer"]
-            if location in valid_locations:
-                self.current_location = location
-                obs = f"You moved to the {location}."
-            else:
-                obs = f"Unknown location: {location}"
-
-        # Pick up
-        elif action_lower.startswith("pick up") or action_lower.startswith("take"):
-            obj_name = action_lower.replace("pick up", "").replace("take", "").strip()
-            if obj_name in self.objects:
-                obj = self.objects[obj_name]
-                if obj.get("location") == self.current_location:
-                    self.inventory.append(obj_name)
-                    obj["location"] = "inventory"
-                    obs = f"You picked up the {obj_name}."
-                    reward = 0.05
-                else:
-                    obs = f"The {obj_name} is not here."
-            else:
-                obs = f"No {obj_name} found."
-
-        # Put/place
-        elif action_lower.startswith("put") or action_lower.startswith("place"):
-            parts = action_lower.replace("put", "").replace("place", "").strip()
-            # Try to parse "X in/on Y"
-            if " in " in parts or " on " in parts:
-                for sep in [" in ", " on "]:
-                    if sep in parts:
-                        obj_name, container = parts.split(sep)
-                        obj_name = obj_name.strip()
-                        container = container.strip()
+    def get_action_space(self, abstract=True):
+        svalid_actions = []
+        if abstract:
+            for a in self.env.getPossibleActions():
+                if "reset" not in a:
+                    svalid_actions.append(a)
+        else:
+            valid_actions = self.env.getValidActionObjectCombinationsWithTemplates()
+            forbidden_words = ["teleport", "connect", "dunk", "eat", "flush", "close door"]
+            for valid_action in valid_actions:
+                v = valid_action['action']
+                for fw in forbidden_words:
+                    if fw in v:
                         break
+                svalid_actions.append(valid_action['action'])
+        if "check valid actions" not in svalid_actions:
+            svalid_actions.append("check valid actions")
+        return svalid_actions
 
-                if obj_name in self.inventory:
-                    self.inventory.remove(obj_name)
-                    self.objects[obj_name]["location"] = container
-                    obs = f"You put the {obj_name} in/on the {container}."
-                    reward = 0.1
+    def getTaskDescription(self):
+        return self.env.getTaskDescription()
 
-        # Heat/cool
-        elif action_lower.startswith("heat"):
-            obj_name = action_lower.replace("heat", "").strip()
-            if obj_name in self.objects:
-                obj = self.objects[obj_name]
-                obj["temp"] = obj.get("temp", 20) + 50
-                if obj.get("state") == "solid" and obj["temp"] > 0:
-                    obj["state"] = "liquid"
-                    obs = f"The {obj_name} melted!"
-                elif obj.get("state") == "liquid" and obj["temp"] > 100:
-                    obj["state"] = "gas"
-                    obs = f"The {obj_name} evaporated!"
-                else:
-                    obs = f"You heated the {obj_name}. Temperature: {obj['temp']}°C"
-                reward = 0.2
-                self.experiment_state["heated"] = obj_name
+    def getGoalProgressStr(self):
+        return self.env.getGoalProgressStr()
 
-        elif action_lower.startswith("cool"):
-            obj_name = action_lower.replace("cool", "").strip()
-            if obj_name in self.objects:
-                obj = self.objects[obj_name]
-                obj["temp"] = obj.get("temp", 20) - 30
-                if obj.get("state") == "liquid" and obj["temp"] < 0:
-                    obj["state"] = "solid"
-                    obs = f"The {obj_name} froze!"
-                else:
-                    obs = f"You cooled the {obj_name}. Temperature: {obj['temp']}°C"
-                reward = 0.2
-                self.experiment_state["cooled"] = obj_name
+    def getGoldActionSequence(self):
+        return self.env.getGoldActionSequence()
 
-        # Measure
-        elif action_lower.startswith("measure") or action_lower.startswith("use thermometer"):
-            obj_name = action_lower.replace("measure", "").replace("use thermometer on", "").strip()
-            if obj_name in self.objects:
-                temp = self.objects[obj_name].get("temp", 20)
-                obs = f"The {obj_name} is at {temp}°C."
-                self.experiment_state["measured"] = {"object": obj_name, "temp": temp}
-                reward = 0.1
+    def reset(self):
+        self.reward = 0.
+        self.done = False
+        return self.env.reset()
 
-        # Mix
-        elif action_lower.startswith("mix"):
-            if len(self.inventory) >= 2:
-                obs = f"You mixed {' and '.join(self.inventory)}."
-                self.experiment_state["mixed"] = list(self.inventory)
-                reward = 0.2
+    def _check_temperature_string(self, s, selected_obs):
+        for i, pattern in enumerate(selected_obs):
+            match = re.search(pattern, s)
+            if match:
+                self.finished_sub_goal[i] = 1.
 
-        # Look/examine
-        elif action_lower in ["look", "examine", "look around"]:
-            obs = self._get_observation()
+    def get_reward(self):
+        if not self.finished_sub_goal:
+            return 0.
+        return sum(self.finished_sub_goal) * 1.0 / len(self.finished_sub_goal)
 
-        # Check for task completion
-        done, success = self._check_completion()
-        if done:
-            reward = 1.0 if success else 0.0
-            obs += " Task completed!" if success else " Task failed."
+    def _check_is_done(self, selected_obs):
+        return sum(self.finished_sub_goal) >= len(selected_obs)
 
-        progress = self._calculate_progress()
 
-        return obs, reward, done, {"success": success if done else False, "progress": progress}
-
-    def _check_completion(self) -> Tuple[bool, bool]:
-        """Check if task is completed."""
-        task_type = self.task_type
-        goal = self.task.input_text.lower()
-
-        if "melt" in goal:
-            for obj in self.objects.values():
-                if obj.get("state") == "liquid" and "melted" not in str(obj):
-                    if self.experiment_state.get("heated"):
-                        return True, True
-
-        if "freeze" in goal or "solidify" in goal:
-            for obj in self.objects.values():
-                if obj.get("state") == "solid" and obj.get("temp", 20) < 0:
-                    return True, True
-
-        if "measure" in goal and "temperature" in goal:
-            if self.experiment_state.get("measured"):
-                return True, True
-
-        if "boil" in goal or "evaporate" in goal:
-            for obj in self.objects.values():
-                if obj.get("state") == "gas":
-                    return True, True
-
-        return False, False
-
-    def _calculate_progress(self) -> float:
-        """Calculate task progress."""
-        progress = 0.0
-
-        if self.experiment_state:
-            progress += 0.3
-
-        if self.inventory:
-            progress += 0.1 * len(self.inventory)
-
-        if any(obj.get("temp", 20) != 20 for obj in self.objects.values()):
-            progress += 0.2
-
-        return min(progress, 0.9)
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ScienceWorldDataset(MultiTurnDataset):
-    """
-    ScienceWorld dataset for scientific experimentation.
+    """ScienceWorld dataset backed by AgentBoard test.jsonl + real ScienceWorldEnv.
 
-    Tasks involve physical, chemical, and biological processes.
+    90 test instances across 62 unique goals / 30 task types.
     """
 
     def __init__(
         self,
         data_path: Optional[str] = None,
         split: DatasetSplit = DatasetSplit.TEST,
-        task_types: Optional[List[str]] = None,
         **kwargs,
     ):
-        """
-        Initialize ScienceWorld dataset.
-
-        Args:
-            data_path: Path to ScienceWorld data
-            split: Dataset split
-            task_types: Filter by task types
-        """
-        super().__init__(data_path, split, **kwargs)
-        self.task_types = task_types
+        agentboard_root = data_path or _AGENTBOARD_DEFAULT
+        self._agentboard_root = agentboard_root
+        jsonl_path = os.path.join(agentboard_root, "scienceworld", "test.jsonl")
+        super().__init__(data_path=jsonl_path, split=split, **kwargs)
 
     @property
     def name(self) -> str:
         return "scienceworld"
 
     def _load_data(self) -> List[TaskInstance]:
-        """Load ScienceWorld tasks."""
-        tasks = [
-            {"goal": "Melt the ice and measure its temperature.", "type": "phase_change"},
-            {"goal": "Freeze the water.", "type": "phase_change"},
-            {"goal": "Boil water to create steam.", "type": "phase_change"},
-            {"goal": "Measure the temperature of the water.", "type": "measurement"},
-            {"goal": "Heat the beaker with water.", "type": "heating"},
-            {"goal": "Cool the water below freezing.", "type": "cooling"},
-            {"goal": "Grow a plant from a seed.", "type": "biology"},
-            {"goal": "Mix two substances together.", "type": "chemistry"},
-            {"goal": "Observe the state change of ice.", "type": "observation"},
-            {"goal": "Conduct a temperature experiment.", "type": "experiment"},
-        ]
+        if not self.data_path or not os.path.exists(self.data_path):
+            raise FileNotFoundError(
+                f"ScienceWorld test.jsonl not found at {self.data_path!r}. "
+                "Set AGENTBOARD_DATA_PATH or pass data_path= to ScienceWorldDataset."
+            )
+
+        data_dir = os.path.join(self._agentboard_root, "scienceworld")
+        goal_map = _build_goal_map(data_dir)
 
         instances = []
-        for idx, task in enumerate(tasks):
-            task_type = task.get("type", "general")
+        with open(self.data_path) as f:
+            for line in f:
+                rec = json.loads(line)
+                goal_text = rec["goal"].strip()
 
-            if self.task_types and task_type not in self.task_types:
-                continue
+                env_info = goal_map.get(goal_text)
+                if env_info is None:
+                    for key, val in goal_map.items():
+                        if goal_text[:60] in key or key[:60] in goal_text:
+                            env_info = val
+                            break
+                if env_info is None:
+                    continue
 
-            instances.append(TaskInstance(
-                task_id=f"scienceworld_{idx}",
-                input_text=task["goal"],
-                target="success",
-                metadata={"task_type": task_type},
-                domain="science",
-                difficulty=self._estimate_difficulty(task_type),
-            ))
+                task_name, var_idx = env_info
+                subgoals = rec["subgoals"]
+                if isinstance(subgoals, str):
+                    subgoals = [s.strip() for s in subgoals.split("\n") if s.strip()]
 
+                instances.append(TaskInstance(
+                    task_id=f"scienceworld_{rec['id']}",
+                    input_text=goal_text,
+                    target="success",
+                    metadata={
+                        "id": rec["id"],
+                        "task_name": task_name,
+                        "var_idx": var_idx,
+                        "subgoals": subgoals,
+                    },
+                    difficulty=rec.get("difficulty"),
+                    domain="science",
+                ))
         return instances
 
-    def _estimate_difficulty(self, task_type: str) -> str:
-        """Estimate task difficulty."""
-        easy = ["measurement", "observation"]
-        medium = ["heating", "cooling", "phase_change"]
-        hard = ["chemistry", "biology", "experiment"]
-
-        if task_type in easy:
-            return "easy"
-        elif task_type in medium:
-            return "medium"
-        return "hard"
-
-    def get_environment(self, task_instance: TaskInstance) -> ScienceWorldEnvironment:
-        """Get ScienceWorld environment for task."""
-        return ScienceWorldEnvironment(task_instance)
+    def get_environment(self, task_instance: TaskInstance) -> Scienceworld:
+        # TODO: adapt Scienceworld constructor for per-task use
+        raise NotImplementedError("Scienceworld.get_environment() needs constructor adaptation")
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
-        """Get environment instructions."""
-        return """You are in a science lab. Available actions:
-- go to [location]: Move to lab, greenhouse, storage, sink, freezer
-- pick up [object]: Pick up an object
-- put [object] in/on [container]: Place object somewhere
-- heat [object]: Apply heat to an object
-- cool [object]: Cool an object
-- measure [object]: Use thermometer to measure temperature
-- mix: Mix items in inventory
-- look: Observe surroundings
-
-Objects may change state (solid/liquid/gas) based on temperature."""
+        return (
+            "You are in a science lab simulator. Issue plain text commands like:\n"
+            "  move to kitchen / look around / pick up [object] / put [object] in [container]\n"
+            "  focus on [object] / heat [object] / cool [object] / mix [object] and [object]\n"
+            "Special command: 'check valid actions' to list available actions.\n"
+            "Type commands one at a time."
+        )
 
     def evaluate(self, prediction: str, target: str) -> Dict[str, Any]:
-        """Evaluate based on task completion."""
-        return {
-            "success": prediction.lower() == "success",
-            "progress": 1.0 if prediction.lower() == "success" else 0.0,
-        }
+        success = prediction.lower() == "success"
+        return {"success": success, "progress": 1.0 if success else 0.0}

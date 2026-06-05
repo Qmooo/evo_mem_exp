@@ -1,279 +1,406 @@
-"""PDDL dataset loader.
+"""PDDL dataset – AgentBoard env class (pddlgym-based) + evo_mem streaming adapter.
 
-PDDL (Planning Domain Definition Language) tasks for symbolic planning,
-testing the agent's ability to reason about states and actions.
+Four PDDL planning domains: gripper, blocks, barman, tyreworld.
+
+Requires:
+    pip install pddlgym nltk
+
+Data path (set via env var or pass data_path=):
+    AGENTBOARD_DATA_PATH=/path/to/agentboard/data
+    → expects $AGENTBOARD_DATA_PATH/pddl/test.jsonl
 """
 
-from typing import List, Dict, Any, Optional, Tuple, Set
+from __future__ import annotations
+
 import json
-from dataclasses import dataclass, field
+import os
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..base import MultiTurnDataset, TaskInstance, DatasetSplit
+import nltk
+import pddlgym
+from pddlgym.structs import Literal, Predicate
+
+from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
+
+_AGENTBOARD_DEFAULT = os.environ.get(
+    "AGENTBOARD_DATA_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "data", "agentboard", "data"),
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level constants from AgentBoard pddl_env.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+predicate_map = {
+    # Blocks
+    "on": "{} is on {}.",
+    "clear": "{} is clear.",
+    "arm-empty": "Your arm is empty.",
+    "holding": "You are holding {}.",
+    "on-table": "{} is on the table.",
+    "putdown": "Putdown {}.",
+    "stack": "Stack {} on {}.",
+    "pickup": "Pickup {}.",
+    "unstack": "Unstack {} from {}.",
+    # tyreworld
+    "vehicle-at": "The vehicle is at {}.",
+    "changetire": "Change tire at {}",
+    "spare-in": "The spare tire is in {}.",
+    "road": "There is a road from {} to {}.",
+    "movecar": "Move the car to {}.",
+    "isopen": "{} is open.",
+    "closed": "{} is closed.",
+    "have": "You have {}.",
+    "in": "{} is in {}.",
+    "loose": "The nut {} on the hub {} is loose.",
+    "tight": "The nut {} on the hub {} is tight.",
+    "unlocked": "{} is unlocked.",
+    "on-ground": "Hub {} is on the ground.",
+    "not-on-ground": "Hub {} is not on the ground.",
+    "inflated": "Wheel {} is inflated.",
+    "not-inflated": "Wheel {} is not inflated.",
+    "fastened": "Hub {} is fastened.",
+    "unfastened": "Hub {} is unfastened.",
+    "free": "Hub {} is free.",
+    "intact": "Wheel {} is intact.",
+    "open": "Open {}.",
+    "close": "Close {}.",
+    "fetch": "Fetch {} from {}.",
+    "put-away": "Put-away {} in {}.",
+    "loosen": "Loosen the nut {} on the hub {}.",
+    "tighten": "Tighten the nut {} on the hub {}.",
+    "jack-up": "jack-up the hub {}.",
+    "jack-down": "Jack-down the hub {}.",
+    "undo": "Undo the fastening of the nut {} on the hub {}.",
+    "do-up": "Do-up the nut {} on the hub {}.",
+    "remove-wheel": "Remove-wheel {} from the hub {}.",
+    "put-on-wheel": "put-on-wheel {} on the hub {}.",
+    "inflate": "Inflate the wheel {}.",
+    # hanoi
+    "move": "Move {} to {}.",
+    "smaller": "{} is smaller than {}.",
+    # gripper
+    "ball": "{} is a ball. ",
+    "gripper": "{} is a gripper. ",
+    "at-robby": "Robby is at {}. ",
+    "at": "{} is at {}. ",
+    "carry": "{} is carrying {}. ",
+    "pick": "Pick up {} at {} with arm {}. ",
+    # barman
+    "ontable": "{} is on the table. ",
+    "empty": "{} is empty. ",
+    "contains": "{} contains {}. ",
+    "clean": "{} is clean. ",
+    "used": "Pour {} from a shot glass to a used shaker {}",
+    "dispenses": "{} dispenses {}. ",
+    "shaker-empty-level": "{} is at empty level {}. ",
+    "shaker-level": "{} is at level {}. ",
+    "next": "level {} is next to level {}. ",
+    "unshaked": "{} is unshaked. ",
+    "shaked": "{} is shaked. ",
+    "cocktail-part1": "{} part1 ingredient is {}. ",
+    "cocktail-part2": "{} part2 ingredient is {}. ",
+    "grasp": "{} grasp {}. ",
+    "leave": "{} leave {}. ",
+    "fill-shot": "fill-shot glass {} with {} with {} and {} holding {}. ",
+    "refill-shot": "refill-shot {} with {} with {} and {} holding {}. ",
+    "empty-shot": "use hand {} to empty-shot glass {} with beverage {}. ",
+    "clean-shot": "clean-shot glass {} with {} with hand {} holding shot glass and {}. ",
+    "pour-shot-to-clean-shaker": "pour-shot-to-clean-shaker from a shot glass {} with {} to a clean shaker {} with hand {} from level {} to level {}",
+    "pour-shot-to-used-shaker": "pour-shot-to-used-shaker from a shot glass {} with {} to a used shaker {} with hand {} from level {} to level {}",
+    "empty-shaker": "use hand {} to empty-shaker {} with ingredient {} from level {} to level {}.",
+    "clean-shaker": "use hand {} and hand {} to clean-shaker {}",
+    "shake": "shake a cocktail {} with ingredient {} and ingredient {} in a shaker {} with hand {} and hand {}",
+    "pour-shaker-to-shot": "pour-shaker-to-shot to a shot glass {} the ingredient {} with hand {} from shaker {} from level {} to level {}",
+}
+
+description_map = {
+    "blocks": '''
+    The robot has four actions: pickup, putdown, stack, and unstack. The domain assumes a world where there are a set of blocks that can be stacked on top of each other, an arm that can hold one block at a time, and a table where blocks can be placed.
+    The actions defined in this domain include:
+    pickup <block>: allows the arm to pick up a block from the table if it is clear and the arm is empty. After the pickup action, the arm will be holding the block, and the block will no longer be on the table or clear.
+    putdown <block>: allows the arm to put down a block on the table if it is holding a block. After the putdown action, the arm will be empty, and the block will be on the table and clear.
+    stack <block> <block>: allows the arm to stack a block on top of another block if the arm is holding the top block and the bottom block is clear. After the stack action, the arm will be empty, the top block will be on top of the bottom block, and the bottom block will no longer be clear.
+    unstack <block> <block>: allows the arm to unstack a block from on top of another block if the arm is empty and the top block is clear. After the unstack action, the arm will be holding the top block, the top block will no longer be on top of the bottom block, and the bottom block will be clear.
+    ''',
+    "barman": '''
+    You are a robot barman that manipulates drink dispensers, shot glasses and a shaker. You have two hands. The goal is to find a plan that serves a desired set of drinks.
+    Actions: grasp, leave, fill-shot, refill-shot, empty-shot, clean-shot, pour-shot-to-clean-shaker, pour-shot-to-used-shaker, empty-shaker, clean-shaker, shake, pour-shaker-to-shot.
+    ''',
+    "gripper": '''
+    You are a robot with a gripper that can move objects between different rooms.
+    Actions: move <room1> <room2>, pick <obj> <room> <gripper>, drop <obj> <room> <gripper>.
+    ''',
+    "tyreworld": '''
+    Your goal is to replace flat tyres with intact tyres on the hubs. Intact tyres should be inflated. The nuts should be tight on the hubs. The flat tyres, wrench, jack, and pump should be in the boot. The boot should be closed.
+    Actions: open, close, fetch, put-away, loosen, tighten, jack-up, jack-down, undo, do-up, remove-wheel, put-on-wheel, inflate.
+    ''',
+}
 
 
-@dataclass
-class PDDLState:
-    """PDDL state representation."""
-    predicates: Set[str] = field(default_factory=set)
+# ─────────────────────────────────────────────────────────────────────────────
+# AgentBoard PDDL environment class (copied; registry/BaseEnvironment/
+# sys.path/nltk.download/from_config stripped)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def satisfies(self, goal: Set[str]) -> bool:
-        """Check if state satisfies goal."""
-        return goal.issubset(self.predicates)
+class PDDL:
+    def __init__(self, problem_index=0,
+                 game_name="blocks",
+                 game_config=None,
+                 allow_restart=True,
+                 difficulty="easy"
+                 ):
+        self.game_name = game_name
+        self.difficulty = difficulty
+        self.game_config = game_config
+        self.allow_restart = allow_restart
+        self.env = pddlgym.make("PDDLEnv{}-v0".format(self.game_name.capitalize()))
+        self.env.fix_problem_index(problem_index)
+        self.last_obs = None
+        self.reset()
 
-    def copy(self) -> "PDDLState":
-        return PDDLState(predicates=self.predicates.copy())
+    def _get_info(self):
+        return self.infos
+
+    def _get_obs(self):
+        return self.states[-1]
+
+    def _get_goal(self):
+        return self.goal
+
+    def _get_history(self):
+        return self.history
+
+    def _get_action_space(self):
+        if self.game_name in ["barman", "tyreworld"]:
+            return [self.literal_to_text(literal) for literal in self.env.action_space.all_ground_literals(self.last_obs)] + ["check valid actions", "look around"]
+        return [self.literal_to_text(literal) for literal in self.env.action_space.all_ground_literals(self.last_obs)] + ["check valid actions"]
+
+    def text_to_action(self, text):
+        text = text.lower()
+        all_valid_actions = self.env.action_space.all_ground_literals(self.last_obs)
+        all_valid_predicates = [action.predicate for action in all_valid_actions]
+        predicates_names = {predicate.name.lower(): predicate for predicate in all_valid_predicates}
+        predicates_obj_nums = {predicate.name.lower(): predicate.arity for predicate in all_valid_predicates}
+        all_valid_objects = [obj for obj in self.last_obs.objects]
+        all_valid_objects_name = [str(obj) for obj in all_valid_objects]
+        all_valid_objects_id = [obj.name for obj in all_valid_objects]
+        try:
+            tokens = nltk.word_tokenize(text)
+        except LookupError:
+            nltk.download('punkt', quiet=True)
+            tokens = nltk.word_tokenize(text)
+        predicate_name = None
+        for token in tokens:
+            if token in predicates_names:
+                predicate_name = token
+                break
+        if predicate_name is None:
+            return None
+        else:
+            predicate_obj_nums = predicates_obj_nums[predicate_name]
+            if predicate_obj_nums == 0:
+                return Literal(Predicate(predicate_name))
+            else:
+                objects = []
+                for token in tokens:
+                    if token in all_valid_objects_name:
+                        objects.append(token)
+                    elif token in all_valid_objects_id:
+                        objects.append(all_valid_objects[all_valid_objects_id.index(token)])
+                    else:
+                        continue
+                if len(objects) > predicate_obj_nums:
+                    objects = objects[:predicate_obj_nums]
+                elif len(objects) < predicate_obj_nums:
+                    return None
+        predicate = predicates_names[predicate_name]
+        literal = Literal(predicate, objects)
+        return literal
+
+    def literal_to_text(self, literal):
+        predicate_name = literal.predicate.name
+        objects = literal.variables
+        if predicate_name in predicate_map:
+            predicate_format = predicate_map[predicate_name]
+            objects_name = [str(obj.name) for obj in objects]
+            text = predicate_format.format(*objects_name)
+        else:
+            text = predicate_name + " " + " ".join([str(obj.name) for obj in objects])
+        return text
+
+    def get_goal_and_obs(self, obs):
+        goal = obs.goal
+        goal = [self.literal_to_text(literal) for literal in goal.literals]
+        goal.sort()
+        goal_text = "The goal is to satisfy the following conditions: " + ", ".join(goal)
+        state = obs.literals
+        if self.game_name in ["barman", "tyreworld"]:
+            if self.last_obs is not None:
+                state = [literal for literal in state if literal not in self.last_obs.literals]
+        state_text = [self.literal_to_text(literal).capitalize() for literal in state]
+        state_text.sort()
+        state_text = " ".join(state_text)
+        return goal_text, state_text, obs.goal.literals
+
+    def reset(self):
+        obs, debug_info = self.env.reset()
+        self.goal, self.init_obs, self.goal_literals = self.get_goal_and_obs(obs)
+        self.last_obs = obs
+        self.infos = dict()
+        self.infos["goal_literal"] = obs.goal
+        self.states = [self.init_obs]
+        self.history = [("state", self.init_obs)]
+        self.steps = 0
+        self.infos["goal"] = self.goal
+        self.infos["states"] = self.states
+        self.infos["history"] = self.history
+        self.infos["steps"] = self.steps
+        self.infos["state"] = self.states[-1]
+        self.reward = 0
+        self.done = False
+        self.won = False
+
+    def constraint_satisfaction_metric(self, obs_literals, goal_literals):
+        satisfied = 0
+        all = 0
+        for literal in goal_literals:
+            if literal in obs_literals:
+                satisfied += 1
+            all += 1
+        return satisfied / all
+
+    def step(self, action):
+        if "check" in action.lower():
+            obs = "Valid actions are: " + ", ".join(self._get_action_space())
+            self.update_info(action, obs)
+            self.infos["action_is_valid"] = True
+            return self._get_obs(), self.reward, self.done, self.infos
+        if "look around" in action.lower():
+            obs = [self.literal_to_text(literal).capitalize() for literal in self.last_obs.literals]
+            obs = " ".join(obs)
+            self.update_info(action, obs)
+            self.infos["action_is_valid"] = True
+            return self._get_obs(), self.reward, self.done, self.infos
+        action_literal = self.text_to_action(action)
+        if action_literal is not None:
+            obs_temp, reward, done, infos = self.env.step(action_literal)
+            reward = max(self.reward, self.constraint_satisfaction_metric(obs_temp.literals, self.goal_literals))
+            if obs_temp == self.last_obs:
+                obs = "The action is not valid and therefore takes no effect. Please remember to satisfy the restriction of actions. You can also check valid actions."
+                self.update_info(action, obs)
+                self.infos["action_is_valid"] = False
+                return self._get_obs(), self.reward, self.done, self.infos
+            else:
+                _, obs, _ = self.get_goal_and_obs(obs_temp)
+                self.last_obs = obs_temp
+                self.update(action, obs, reward, done, infos)
+                self.infos["action_is_valid"] = True
+                return self._get_obs(), self.reward, self.done, self.infos
+        else:
+            obs = "The action is not valid and therefore takes no effect. Please check valid actions."
+            self.update_info(action, obs)
+            self.infos["action_is_valid"] = False
+            return self._get_obs(), self.reward, self.done, self.infos
+
+    def update(self, action, obs, reward, done, infos):
+        for k, v in infos.items():
+            self.infos[k] = v
+        goal_literals = self.infos["goal_literal"].literals
+        obs_literals = self.last_obs.literals
+        self.won = True
+        for literal in goal_literals:
+            if literal not in obs_literals:
+                self.won = False
+                break
+        self.steps += 1
+        self.reward = reward
+        self.done = done
+        if self.won:
+            obs += " The goal is satisfied."
+        self.history.append(("action", action))
+        self.history.append(("reward", reward))
+        self.history.append(("state", obs))
+        self.states.append(obs)
+        self.infos["goal"] = self.goal
+        self.infos["states"] = self.states
+        self.infos["history"] = self.history
+        self.infos["steps"] = self.steps
+        self.infos["state"] = self.states[-1]
+
+    def update_info(self, action, info):
+        self.history.append(("action", action))
+        self.history.append(("reward", self.reward))
+        self.history.append(("state", info))
+        self.states.append(info)
+        self.steps += 1
+        self.infos["goal"] = self.goal
+        self.infos["states"] = self.states
+        self.infos["history"] = self.history
+        self.infos["steps"] = self.steps
+        self.infos["state"] = self.states[-1]
 
 
-class PDDLEnvironment:
-    """
-    Simulated PDDL environment.
-
-    Implements a simplified Blocksworld domain.
-    """
-
-    def __init__(self, task: TaskInstance):
-        self.task = task
-        self.goal_predicates = self._parse_goal(task.input_text)
-        self.state = self._initialize_state(task.metadata)
-        self.step_count = 0
-        self.max_steps = 30
-
-    def _parse_goal(self, goal_text: str) -> Set[str]:
-        """Parse goal from text."""
-        goal_text = goal_text.lower()
-        predicates = set()
-
-        # Parse on(X, Y) patterns
-        import re
-        on_matches = re.findall(r'(\w+) on (\w+)', goal_text)
-        for obj, surface in on_matches:
-            predicates.add(f"on({obj},{surface})")
-
-        # Parse clear(X) patterns
-        clear_matches = re.findall(r'(\w+) is clear', goal_text)
-        for obj in clear_matches:
-            predicates.add(f"clear({obj})")
-
-        # Parse holding(X) patterns
-        holding_matches = re.findall(r'holding (\w+)', goal_text)
-        for obj in holding_matches:
-            predicates.add(f"holding({obj})")
-
-        return predicates
-
-    def _initialize_state(self, metadata: Dict) -> PDDLState:
-        """Initialize PDDL state."""
-        init_predicates = metadata.get("init_state", set())
-        if isinstance(init_predicates, list):
-            init_predicates = set(init_predicates)
-        elif not init_predicates:
-            # Default Blocksworld initial state
-            init_predicates = {
-                "on(a,table)",
-                "on(b,table)",
-                "on(c,a)",
-                "clear(b)",
-                "clear(c)",
-                "clear(table)",
-                "arm-empty",
-            }
-        return PDDLState(predicates=init_predicates)
-
-    def reset(self) -> str:
-        """Reset environment."""
-        self.step_count = 0
-        self.state = self._initialize_state(self.task.metadata)
-        return self._get_observation()
-
-    def _get_observation(self) -> str:
-        """Get current state observation."""
-        return f"Current state: {', '.join(sorted(self.state.predicates))}. Goal: {', '.join(sorted(self.goal_predicates))}"
-
-    def step(self, action: str) -> Tuple[str, float, bool, Dict]:
-        """Execute PDDL action."""
-        self.step_count += 1
-        action = action.lower().strip()
-
-        if self.step_count >= self.max_steps:
-            return "Max steps reached.", 0.0, True, {"success": False, "progress": 0.3}
-
-        reward = 0.0
-        done = False
-        obs = "Action failed."
-
-        # Parse action
-        import re
-
-        # Pick-up action: pickup(X)
-        pickup_match = re.match(r'pickup\s*\(?(\w+)\)?', action)
-        if pickup_match:
-            obj = pickup_match.group(1)
-            # Preconditions: clear(obj), on(obj,?), arm-empty
-            if (f"clear({obj})" in self.state.predicates and
-                "arm-empty" in self.state.predicates):
-                # Find what obj is on
-                for pred in list(self.state.predicates):
-                    if pred.startswith(f"on({obj},"):
-                        surface = pred.split(",")[1].rstrip(")")
-                        self.state.predicates.remove(pred)
-                        self.state.predicates.add(f"clear({surface})")
-                        break
-
-                self.state.predicates.remove("arm-empty")
-                self.state.predicates.remove(f"clear({obj})")
-                self.state.predicates.add(f"holding({obj})")
-                obs = f"Picked up {obj}."
-                reward = 0.1
-
-        # Put-down action: putdown(X)
-        putdown_match = re.match(r'putdown\s*\(?(\w+)\)?', action)
-        if putdown_match:
-            obj = putdown_match.group(1)
-            if f"holding({obj})" in self.state.predicates:
-                self.state.predicates.remove(f"holding({obj})")
-                self.state.predicates.add(f"on({obj},table)")
-                self.state.predicates.add("arm-empty")
-                self.state.predicates.add(f"clear({obj})")
-                obs = f"Put {obj} on table."
-                reward = 0.1
-
-        # Stack action: stack(X,Y)
-        stack_match = re.match(r'stack\s*\(?(\w+)\s*,\s*(\w+)\)?', action)
-        if stack_match:
-            obj, dest = stack_match.groups()
-            if (f"holding({obj})" in self.state.predicates and
-                f"clear({dest})" in self.state.predicates):
-                self.state.predicates.remove(f"holding({obj})")
-                self.state.predicates.remove(f"clear({dest})")
-                self.state.predicates.add(f"on({obj},{dest})")
-                self.state.predicates.add("arm-empty")
-                self.state.predicates.add(f"clear({obj})")
-                obs = f"Stacked {obj} on {dest}."
-                reward = 0.2
-
-        # Unstack action: unstack(X,Y)
-        unstack_match = re.match(r'unstack\s*\(?(\w+)\s*,\s*(\w+)\)?', action)
-        if unstack_match:
-            obj, surface = unstack_match.groups()
-            if (f"on({obj},{surface})" in self.state.predicates and
-                f"clear({obj})" in self.state.predicates and
-                "arm-empty" in self.state.predicates):
-                self.state.predicates.remove(f"on({obj},{surface})")
-                self.state.predicates.remove(f"clear({obj})")
-                self.state.predicates.remove("arm-empty")
-                self.state.predicates.add(f"clear({surface})")
-                self.state.predicates.add(f"holding({obj})")
-                obs = f"Unstacked {obj} from {surface}."
-                reward = 0.1
-
-        # Check goal
-        if self.state.satisfies(self.goal_predicates):
-            done = True
-            reward = 1.0
-            obs += " Goal achieved!"
-
-        progress = len(self.goal_predicates & self.state.predicates) / max(len(self.goal_predicates), 1)
-
-        return obs, reward, done, {"success": done and reward > 0, "progress": progress}
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset
+# ─────────────────────────────────────────────────────────────────────────────
 
 class PDDLDataset(MultiTurnDataset):
-    """
-    PDDL dataset for symbolic planning.
+    """PDDL dataset backed by AgentBoard test.jsonl (pddlgym-based).
 
-    Uses Blocksworld domain by default.
+    Four domains: gripper, blocks, barman, tyreworld.
     """
 
     def __init__(
         self,
         data_path: Optional[str] = None,
         split: DatasetSplit = DatasetSplit.TEST,
-        domain: str = "blocksworld",
         **kwargs,
-    ):
-        """
-        Initialize PDDL dataset.
-
-        Args:
-            data_path: Path to PDDL data
-            split: Dataset split
-            domain: PDDL domain (blocksworld, logistics, etc.)
-        """
-        super().__init__(data_path, split, **kwargs)
-        self.domain = domain
+    ) -> None:
+        agentboard_root = data_path or _AGENTBOARD_DEFAULT
+        jsonl_path = os.path.join(agentboard_root, "pddl", "test.jsonl")
+        super().__init__(data_path=jsonl_path, split=split, **kwargs)
 
     @property
     def name(self) -> str:
         return "pddl"
 
     def _load_data(self) -> List[TaskInstance]:
-        """Load PDDL tasks."""
-        # Sample Blocksworld tasks
-        tasks = [
-            {
-                "goal": "a on b, b on table",
-                "init_state": ["on(a,table)", "on(b,table)", "clear(a)", "clear(b)", "arm-empty"],
-            },
-            {
-                "goal": "a on b, b on c, c on table",
-                "init_state": ["on(a,table)", "on(b,table)", "on(c,table)", "clear(a)", "clear(b)", "clear(c)", "arm-empty"],
-            },
-            {
-                "goal": "c on b, b on a",
-                "init_state": ["on(a,table)", "on(b,a)", "on(c,table)", "clear(b)", "clear(c)", "arm-empty"],
-            },
-            {
-                "goal": "a on table, b on table, c on table",
-                "init_state": ["on(a,b)", "on(b,c)", "on(c,table)", "clear(a)", "arm-empty"],
-            },
-            {
-                "goal": "holding a",
-                "init_state": ["on(a,table)", "clear(a)", "arm-empty"],
-            },
-        ]
-
+        if not self.data_path or not os.path.exists(self.data_path):
+            raise FileNotFoundError(
+                f"PDDL test.jsonl not found at {self.data_path!r}. "
+                "Set AGENTBOARD_DATA_PATH or pass data_path= to PDDLDataset."
+            )
         instances = []
-        for idx, task in enumerate(tasks):
-            instances.append(TaskInstance(
-                task_id=f"pddl_{idx}",
-                input_text=task["goal"],
-                target="success",
-                metadata={
-                    "init_state": task["init_state"],
-                    "domain": self.domain,
-                },
-                domain="planning",
-                difficulty=self._estimate_difficulty(task),
-            ))
-
+        with open(self.data_path) as f:
+            for line in f:
+                rec = json.loads(line)
+                domain = rec["additional_info"]["subtask"]
+                subgoals = rec["subgoals"]
+                if isinstance(subgoals, str):
+                    subgoals = [s.strip() for s in subgoals.split("\n") if s.strip()]
+                instances.append(TaskInstance(
+                    task_id=f"pddl_{rec['id']}",
+                    input_text=rec["goal"],
+                    target="success",
+                    metadata={
+                        "id": rec["id"],
+                        "domain": domain,
+                        "subgoals": subgoals,
+                    },
+                    difficulty=rec.get("difficulty"),
+                    domain="planning",
+                ))
         return instances
 
-    def _estimate_difficulty(self, task: Dict) -> str:
-        """Estimate task difficulty."""
-        num_goals = task["goal"].count(",") + 1
-        if num_goals <= 1:
-            return "easy"
-        elif num_goals <= 2:
-            return "medium"
-        return "hard"
-
-    def get_environment(self, task_instance: TaskInstance) -> PDDLEnvironment:
-        """Get PDDL environment for task."""
-        return PDDLEnvironment(task_instance)
+    def get_environment(self, task_instance: TaskInstance) -> PDDL:
+        # TODO: adapt PDDL constructor for per-task use (problem_index, game_name from metadata)
+        raise NotImplementedError("PDDL.get_environment() needs constructor adaptation")
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
-        """Get environment instructions."""
-        return """This is a Blocksworld planning domain. Available actions:
-- pickup(X): Pick up block X from table (requires: clear(X), arm-empty)
-- putdown(X): Put held block X on table (requires: holding(X))
-- stack(X,Y): Stack block X on block Y (requires: holding(X), clear(Y))
-- unstack(X,Y): Remove block X from block Y (requires: on(X,Y), clear(X), arm-empty)
-
-State predicates: on(X,Y), clear(X), holding(X), arm-empty"""
+        domain = task_instance.metadata["domain"]
+        return description_map.get(domain, "PDDL planning domain.")
 
     def evaluate(self, prediction: str, target: str) -> Dict[str, Any]:
-        """Evaluate based on goal achievement."""
-        return {
-            "success": prediction.lower() == "success",
-            "progress": 1.0 if prediction.lower() == "success" else 0.0,
-        }
+        success = prediction.lower() == "success"
+        return {"success": success, "progress": 1.0 if success else 0.0}

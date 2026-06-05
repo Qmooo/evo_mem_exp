@@ -1,294 +1,329 @@
-"""AlfWorld dataset loader.
+"""AlfWorld dataset – AgentBoard env class + evo_mem streaming adapter.
 
-AlfWorld aligns text and embodied environments for interactive learning,
-featuring household instruction following tasks.
+Requires:
+    pip install alfworld==0.4.2
+
+Game files must be downloaded:
+    alfworld-download --data-dir $AGENTBOARD_DATA_PATH/alfworld
+
+Data path (set via env var or pass data_path=):
+    AGENTBOARD_DATA_PATH=/path/to/agentboard/data
+    → game files at $AGENTBOARD_DATA_PATH/alfworld/json_2.1.1/valid_seen/
+    → JSONL  at     $AGENTBOARD_DATA_PATH/alfworld/test.jsonl
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from __future__ import annotations
+
 import json
+import os
+import random
 import re
-from dataclasses import dataclass
+import yaml
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..base import MultiTurnDataset, TaskInstance, DatasetSplit
+import alfworld
+import alfworld.agents.environment
+import jsonlines
+
+from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
+
+_AGENTBOARD_DEFAULT = os.environ.get(
+    "AGENTBOARD_DATA_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "data", "agentboard", "data"),
+)
+
+# folder prefix → canonical task type key
+_FOLDER_TO_TYPE = {
+    "pick_and_place_simple":          "simple",
+    "look_at_obj_in_light":           "look_at",
+    "pick_clean_then_place_in_recep": "clean",
+    "pick_heat_then_place_in_recep":  "heat",
+    "pick_cool_then_place_in_recep":  "cool",
+    "pick_two_obj_and_place":         "pick_two",
+}
 
 
-@dataclass
-class AlfWorldTask:
-    """AlfWorld task definition."""
-    task_type: str  # pick, clean, heat, cool, examine, puttwo
-    object_type: str
-    receptacle_type: Optional[str] = None
-    second_object: Optional[str] = None
+def _goal_to_type_and_obj(goal: str) -> Tuple[str, str]:
+    """Parse (type_key, object_lower) from an AlfWorld goal string."""
+    g = goal.lower().strip().rstrip(".")
+
+    m = re.match(r"look at (?:an? )?(.+?) under", g)
+    if m:
+        return "look_at", m.group(1).strip()
+    m = re.match(r"examine (?:the |an? )?(.+?) with", g)
+    if m:
+        return "look_at", m.group(1).strip()
+
+    m = re.match(r"put two (.+?) in ", g)
+    if m:
+        return "pick_two", m.group(1).strip()
+
+    if "cool" in g:
+        m = re.search(r"cool (?:some|an? )?(.+?) (?:and|in)", g)
+        if m:
+            return "cool", m.group(1).strip()
+
+    if "heat" in g or "hot" in g:
+        m = re.search(r"(?:heat (?:the|some|an? )?|put a hot )(.+?) (?:and|in|using|with)", g)
+        if m:
+            return "heat", m.group(1).strip()
+
+    if "clean" in g:
+        m = re.search(r"(?:clean (?:some|the|an? )?|put a clean )(.+?) (?:and|in|with|on)", g)
+        if m:
+            return "clean", m.group(1).strip()
+
+    m = re.match(r"put (?:some |an? |a )?(.+?) (?:on|in) ", g)
+    if m:
+        return "simple", m.group(1).strip()
+
+    return "simple", ""
 
 
-class AlfWorldEnvironment:
-    """
-    Simulated AlfWorld environment interface.
+def _parse_subgoal_patterns(raw: List[str]) -> List[str]:
+    """Strip 'Subgoal N: ' prefix from AgentBoard subgoal entries."""
+    patterns = []
+    for s in raw:
+        cleaned = re.sub(r"^Subgoal\s+\d+:\s*", "", s.strip())
+        if cleaned:
+            patterns.append(cleaned)
+    return patterns
 
-    In a full implementation, this would connect to the actual
-    AlfWorld TextWorld environment.
-    """
 
-    def __init__(self, task: TaskInstance):
-        self.task = task
-        self.task_def = self._parse_task(task.input_text)
-        self.state = "initial"
-        self.inventory = []
-        self.current_location = "kitchen"
-        self.step_count = 0
-        self.max_steps = 50
+def _collect_game_files(valid_seen_dir: str) -> Tuple[Dict[Tuple[str, str], List[str]], Dict[str, List[str]]]:
+    """Scan valid_seen/ and return {(type_key, object_lower): [game_file_path]} dict."""
+    index: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    type_only: Dict[str, List[str]] = defaultdict(list)
 
-        # Simulated world state
-        self.objects = self._initialize_objects()
-        self.valid_actions = self._get_valid_actions()
+    for task_folder in sorted(os.listdir(valid_seen_dir)):
+        task_path = os.path.join(valid_seen_dir, task_folder)
+        if not os.path.isdir(task_path):
+            continue
+        type_key = None
+        obj_lower = ""
+        for prefix, key in _FOLDER_TO_TYPE.items():
+            if task_folder.startswith(prefix):
+                type_key = key
+                after_prefix = task_folder[len(prefix) + 1:]
+                obj_part = after_prefix.split("-")[0]
+                obj_lower = obj_part.lower()
+                break
+        if type_key is None:
+            continue
 
-    def _parse_task(self, goal: str) -> AlfWorldTask:
-        """Parse task goal into structured form."""
-        goal_lower = goal.lower()
+        for trial in os.listdir(task_path):
+            trial_path = os.path.join(task_path, trial)
+            game_file = os.path.join(trial_path, "game.tw-pddl")
+            if os.path.exists(game_file):
+                index[(type_key, obj_lower)].append(game_file)
+                type_only[type_key].append(game_file)
+                break
 
-        if "put" in goal_lower and "in/on" in goal_lower:
-            return AlfWorldTask(task_type="put", object_type="object", receptacle_type="receptacle")
-        elif "clean" in goal_lower:
-            return AlfWorldTask(task_type="clean", object_type="object")
-        elif "heat" in goal_lower:
-            return AlfWorldTask(task_type="heat", object_type="object")
-        elif "cool" in goal_lower:
-            return AlfWorldTask(task_type="cool", object_type="object")
-        elif "examine" in goal_lower:
-            return AlfWorldTask(task_type="examine", object_type="object")
+    return index, type_only
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AgentBoard AlfWorld environment class (copied; registry/pdb stripped)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AlfWorld:
+    def __init__(self,
+                 split,
+                 base_config,
+                 batch_size,
+                 seed,
+                 label_path
+                 ):
+        with open(base_config) as reader:
+            config = yaml.safe_load(reader)
+        env = getattr(alfworld.agents.environment, config["env"]["type"])(config, train_eval=split)
+        env.game_files.sort()
+        self.env = env.init_env(batch_size)
+        self.valid_actions = []
+        self.init_obs = ''
+        self.isdone = False
+        self.env_ob = self.init_obs
+        self.finished_sub_goal = []
+        self.labeled_data = {}
+        self.sub_goal = []
+        with open(label_path, 'r+', encoding='utf-8') as f:
+            for item in jsonlines.Reader(f):
+                self.labeled_data[item["additional_info"]['description']] = item
+        random.seed(seed)
+        self.cur_task_name = ""
+        self.reward = 0.
+
+    def reset(self):
+        ob, info = self.env.reset()
+        self.valid_actions = info["admissible_commands"][0]
+        self.init_obs = ('\n'.join(ob[0].split('\n\n')[1:])).split('\n')[0]
+        self.goal = ('\n'.join(ob[0].split('\n\n')[1:])).split('\n')[1]
+        self.env_ob = self.init_obs
+        self.cur_task_name = '/'.join(info['extra.gamefile'][0].split('/')[-3:-1])
+        self.sub_goal = self.labeled_data[self.cur_task_name]["subgoals"]
+        self.difficulty = self.labeled_data[self.cur_task_name]["difficulty"]
+        self.finished_sub_goal = [0 for i in range(len(self.sub_goal) + 1)]
+        self.reward = 0
+        self.isdone = False
+        return ob, info
+
+    def step(self, action):
+        info = None
+        done = self.isdone
+        if action.endswith('.'):
+            action = action[:-1]
+        if action == "look":
+            observation, _, done, info = self.env.step([action])
+            observation = [self.env_ob]
+            done = done[0]
+        elif action == "check valid actions":
+            valid_actions = ", ".join(self.valid_actions)
+            observation = [f"Choose an action from these valid actions: {valid_actions}"]
         else:
-            return AlfWorldTask(task_type="pick", object_type="object")
+            observation, _, done, info = self.env.step([action])
+            done = done[0]
+        if "go to" in action or "open" in action:
+            if "Nothing happens" not in observation[0]:
+                self.env_ob = observation[0]
+        if info:
+            self.valid_actions = info["admissible_commands"][0]
+        observation = self._process_ob(observation[0])
+        self.isdone = done
+        self._check_temperature_string(s=observation, selected_obs=self.sub_goal)
+        self.reward = self._get_reward()
+        return observation, self.reward, done, info
 
-    def _initialize_objects(self) -> Dict[str, Dict]:
-        """Initialize simulated objects."""
-        return {
-            "apple": {"location": "countertop", "state": "normal"},
-            "mug": {"location": "cabinet", "state": "normal"},
-            "plate": {"location": "sink", "state": "dirty"},
-            "knife": {"location": "drawer", "state": "normal"},
-        }
+    def _process_ob(self, ob):
+        if ob.startswith('You arrive at loc '):
+            ob = ob[ob.find('. ') + 2:]
+        return ob
 
-    def _get_valid_actions(self) -> List[str]:
-        """Get currently valid actions."""
-        actions = [
-            "go to kitchen",
-            "go to living room",
-            "go to bedroom",
-            "look around",
-            "check inventory",
-            "examine",
-        ]
+    def _get_reward(self):
+        if self.isdone:
+            return 1.0
+        else:
+            return sum(self.finished_sub_goal) * 1.0 / len(self.finished_sub_goal)
 
-        for obj in self.objects:
-            actions.extend([
-                f"pick up {obj}",
-                f"put {obj} in/on sink",
-                f"use microwave",
-                f"use fridge",
-            ])
+    def _check_temperature_string(self, s, selected_obs):
+        for i, pattern in enumerate(selected_obs):
+            match = re.search(pattern, s)
+            if match:
+                self.finished_sub_goal[i] = 1.
 
-        return actions
+    def get_action_space(self):
+        if "look" not in self.valid_actions:
+            self.valid_actions.append("look")
+        if "check valid actions" not in self.valid_actions:
+            self.valid_actions.append("check valid actions")
+        return self.valid_actions
 
-    def reset(self) -> str:
-        """Reset environment and return initial observation."""
-        self.state = "initial"
-        self.inventory = []
-        self.step_count = 0
-        self.current_location = "kitchen"
 
-        return f"You are in the {self.current_location}. You see a countertop, sink, microwave, and fridge. Your task is: {self.task.input_text}"
-
-    def step(self, action: str) -> Tuple[str, float, bool, Dict]:
-        """
-        Execute action in environment.
-
-        Returns:
-            observation: Text observation
-            reward: Step reward
-            done: Whether episode is done
-            info: Additional info including success and progress
-        """
-        self.step_count += 1
-        action_lower = action.lower().strip()
-
-        # Check for max steps
-        if self.step_count >= self.max_steps:
-            return "Maximum steps reached.", 0.0, True, {"success": False, "progress": 0.5}
-
-        # Process action
-        observation = "Nothing happens."
-        reward = 0.0
-        done = False
-        progress = min(self.step_count / 10, 0.9)
-
-        if action_lower.startswith("go to"):
-            location = action_lower.replace("go to", "").strip()
-            self.current_location = location
-            observation = f"You moved to the {location}."
-
-        elif action_lower == "look around" or action_lower == "look":
-            observation = f"You are in the {self.current_location}. You see various objects around."
-
-        elif action_lower.startswith("pick up") or action_lower.startswith("take"):
-            obj = action_lower.replace("pick up", "").replace("take", "").strip()
-            if obj in self.objects:
-                self.inventory.append(obj)
-                observation = f"You picked up the {obj}."
-                reward = 0.1
-            else:
-                observation = f"You don't see a {obj} here."
-
-        elif action_lower.startswith("put"):
-            if self.inventory:
-                obj = self.inventory[-1]
-                observation = f"You put the {obj} down."
-                self.inventory.pop()
-                # Check if task completed
-                if self.task_def.task_type == "put":
-                    done = True
-                    reward = 1.0
-            else:
-                observation = "You're not holding anything."
-
-        elif "use" in action_lower:
-            if "microwave" in action_lower and self.task_def.task_type == "heat":
-                if self.inventory:
-                    observation = f"You heated the {self.inventory[-1]} in the microwave."
-                    done = True
-                    reward = 1.0
-            elif "fridge" in action_lower and self.task_def.task_type == "cool":
-                if self.inventory:
-                    observation = f"You cooled the {self.inventory[-1]} in the fridge."
-                    done = True
-                    reward = 1.0
-            else:
-                observation = "You use the appliance but nothing special happens."
-
-        elif action_lower == "check inventory" or action_lower == "inventory":
-            if self.inventory:
-                observation = f"You are carrying: {', '.join(self.inventory)}"
-            else:
-                observation = "Your inventory is empty."
-
-        elif action_lower == "check valid actions":
-            observation = "Valid actions: " + ", ".join(self.valid_actions[:10])
-
-        info = {
-            "success": done and reward > 0,
-            "progress": progress if not done else (1.0 if reward > 0 else 0.5),
-        }
-
-        return observation, reward, done, info
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset
+# ─────────────────────────────────────────────────────────────────────────────
 
 class AlfWorldDataset(MultiTurnDataset):
-    """
-    AlfWorld dataset for household instruction following.
+    """AlfWorld dataset backed by AgentBoard test.jsonl + real textworld game files.
 
-    Task types include:
-    - pick_and_place: Pick up object and place somewhere
-    - clean: Clean objects (wash in sink)
-    - heat: Heat objects (use microwave)
-    - cool: Cool objects (use fridge)
-    - examine: Examine objects with lamp
+    134 test instances across 6 task types (all difficulty=hard per AgentBoard).
     """
 
     def __init__(
         self,
         data_path: Optional[str] = None,
         split: DatasetSplit = DatasetSplit.TEST,
-        task_types: Optional[List[str]] = None,
         **kwargs,
     ):
-        """
-        Initialize AlfWorld dataset.
-
-        Args:
-            data_path: Path to AlfWorld data
-            split: Dataset split
-            task_types: Filter by specific task types
-        """
-        super().__init__(data_path, split, **kwargs)
-        self.task_types = task_types
+        agentboard_root = data_path or _AGENTBOARD_DEFAULT
+        self._agentboard_root = agentboard_root
+        jsonl_path = os.path.join(agentboard_root, "alfworld", "test.jsonl")
+        super().__init__(data_path=jsonl_path, split=split, **kwargs)
 
     @property
     def name(self) -> str:
         return "alfworld"
 
     def _load_data(self) -> List[TaskInstance]:
-        """Load AlfWorld tasks."""
+        if not self.data_path or not os.path.exists(self.data_path):
+            raise FileNotFoundError(
+                f"AlfWorld test.jsonl not found at {self.data_path!r}. "
+                "Set AGENTBOARD_DATA_PATH or pass data_path= to AlfWorldDataset."
+            )
+
+        valid_seen_dir = os.path.join(
+            self._agentboard_root, "alfworld", "json_2.1.1", "valid_seen"
+        )
+        if not os.path.isdir(valid_seen_dir):
+            raise FileNotFoundError(
+                f"AlfWorld game files not found at {valid_seen_dir!r}. "
+                "Run: alfworld-download --data-dir $AGENTBOARD_DATA_PATH/alfworld"
+            )
+
+        obj_index, type_index = _collect_game_files(valid_seen_dir)
+        obj_cursors: Dict[Tuple[str, str], int] = defaultdict(int)
+        type_cursors: Dict[str, int] = defaultdict(int)
+
         instances = []
+        with open(self.data_path) as f:
+            for line in f:
+                rec = json.loads(line)
+                goal = rec["goal"]
+                type_key, obj_lower = _goal_to_type_and_obj(goal)
 
-        # Sample AlfWorld tasks
-        tasks = [
-            {"goal": "Put a hot apple in the fridge.", "type": "cool"},
-            {"goal": "Put a clean mug in the cabinet.", "type": "clean"},
-            {"goal": "Heat the plate and put it on the countertop.", "type": "heat"},
-            {"goal": "Pick up the knife from the drawer.", "type": "pick"},
-            {"goal": "Put the cooled tomato in the microwave.", "type": "put"},
-            {"goal": "Clean the pan and put it on the stove.", "type": "clean"},
-            {"goal": "Put a hot mug on the table.", "type": "heat"},
-            {"goal": "Cool the apple and put it in the bowl.", "type": "cool"},
-            {"goal": "Pick up the book from the shelf.", "type": "pick"},
-            {"goal": "Put the cleaned plate in the cabinet.", "type": "clean"},
-        ]
+                key = (type_key, obj_lower)
+                if obj_index.get(key):
+                    available = obj_index[key]
+                    idx = obj_cursors[key] % len(available)
+                    obj_cursors[key] += 1
+                    game_file = available[idx]
+                else:
+                    available = type_index.get(type_key, type_index.get("simple", []))
+                    idx = type_cursors[type_key] % max(len(available), 1)
+                    type_cursors[type_key] += 1
+                    game_file = available[idx] if available else None
 
-        # Load from file if available
-        if self.data_path:
-            try:
-                with open(self.data_path) as f:
-                    tasks = json.load(f)
-            except FileNotFoundError:
-                pass
+                if game_file is None:
+                    continue
 
-        for idx, task in enumerate(tasks):
-            task_type = task.get("type", "pick")
+                subgoals_raw = rec["subgoals"]
+                if isinstance(subgoals_raw, str):
+                    subgoals_raw = [s for s in subgoals_raw.split("\n") if s.strip()]
+                subgoal_patterns = _parse_subgoal_patterns(subgoals_raw)
 
-            if self.task_types and task_type not in self.task_types:
-                continue
-
-            instances.append(TaskInstance(
-                task_id=f"alfworld_{idx}",
-                input_text=task["goal"],
-                target="success",  # Target is task completion
-                metadata={
-                    "task_type": task_type,
-                    "game_file": task.get("game_file"),
-                },
-                domain="household",
-                difficulty=self._estimate_difficulty(task),
-            ))
-
+                instances.append(TaskInstance(
+                    task_id=f"alfworld_{rec['id']}",
+                    input_text=goal,
+                    target="success",
+                    metadata={
+                        "id": rec["id"],
+                        "game_file": game_file,
+                        "type_key": type_key,
+                        "subgoals": subgoal_patterns,
+                        "difficulty": rec.get("difficulty", "hard"),
+                    },
+                    difficulty=rec.get("difficulty", "hard"),
+                    domain="household",
+                ))
         return instances
 
-    def _estimate_difficulty(self, task: Dict) -> str:
-        """Estimate task difficulty."""
-        task_type = task.get("type", "pick")
-        if task_type in ["pick", "examine"]:
-            return "easy"
-        elif task_type in ["clean", "heat", "cool"]:
-            return "medium"
-        return "hard"
-
-    def get_environment(self, task_instance: TaskInstance) -> AlfWorldEnvironment:
-        """Get AlfWorld environment for task."""
-        return AlfWorldEnvironment(task_instance)
+    def get_environment(self, task_instance: TaskInstance) -> AlfWorld:
+        # TODO: adapt AlfWorld constructor for per-task use
+        raise NotImplementedError("AlfWorld.get_environment() needs constructor adaptation")
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
-        """Get environment instructions."""
-        return """You are in a household environment. You can perform these actions:
-- go to [location]: Move to a location (kitchen, living room, bedroom, etc.)
-- look around: See what's in the current location
-- pick up [object]: Pick up an object
-- put [object] in/on [receptacle]: Place object somewhere
-- use [appliance]: Use microwave, fridge, sink, etc.
-- check inventory: See what you're carrying
-- check valid actions: List available actions"""
+        return (
+            "You are in a household environment. Issue plain text commands like:\n"
+            "  go to [location]\n"
+            "  take [object] from [location]\n"
+            "  put [object] in/on [receptacle]\n"
+            "  open/close [object]\n"
+            "  heat [object] with [appliance] / clean [object] with [appliance]\n"
+            "  look / inventory\n"
+            "Special commands: 'look' (re-show current room), 'check valid actions'.\n"
+            "Observations list objects with numeric IDs (e.g. 'bowl 2'). Include the ID when referring to them."
+        )
 
     def evaluate(self, prediction: str, target: str) -> Dict[str, Any]:
-        """Evaluate based on task completion."""
-        # For multi-turn, evaluation happens through environment
-        return {
-            "success": prediction.lower() == "success",
-            "progress": 1.0 if prediction.lower() == "success" else 0.0,
-        }
+        success = prediction.lower() == "success"
+        return {"success": success, "progress": 1.0 if success else 0.0}
