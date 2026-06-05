@@ -260,6 +260,7 @@ class PDDL:
         self.reward = 0
         self.done = False
         self.won = False
+        return self.init_obs
 
     def constraint_satisfaction_metric(self, obs_literals, goal_literals):
         satisfied = 0
@@ -327,6 +328,8 @@ class PDDL:
         self.infos["history"] = self.history
         self.infos["steps"] = self.steps
         self.infos["state"] = self.states[-1]
+        self.infos["success"] = self.won
+        self.infos["progress"] = float(self.reward)
 
     def update_info(self, action, info):
         self.history.append(("action", action))
@@ -339,6 +342,8 @@ class PDDL:
         self.infos["history"] = self.history
         self.infos["steps"] = self.steps
         self.infos["state"] = self.states[-1]
+        self.infos["success"] = self.won
+        self.infos["progress"] = float(self.reward)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,10 +377,13 @@ class PDDLDataset(MultiTurnDataset):
                 "Set AGENTBOARD_DATA_PATH or pass data_path= to PDDLDataset."
             )
         instances = []
+        domain_counters: Dict[str, int] = {}
         with open(self.data_path) as f:
             for line in f:
                 rec = json.loads(line)
                 domain = rec["additional_info"]["subtask"]
+                problem_index = domain_counters.get(domain, 0)
+                domain_counters[domain] = problem_index + 1
                 subgoals = rec["subgoals"]
                 if isinstance(subgoals, str):
                     subgoals = [s.strip() for s in subgoals.split("\n") if s.strip()]
@@ -386,6 +394,7 @@ class PDDLDataset(MultiTurnDataset):
                     metadata={
                         "id": rec["id"],
                         "domain": domain,
+                        "problem_index": problem_index,
                         "subgoals": subgoals,
                     },
                     difficulty=rec.get("difficulty"),
@@ -394,8 +403,11 @@ class PDDLDataset(MultiTurnDataset):
         return instances
 
     def get_environment(self, task_instance: TaskInstance) -> PDDL:
-        # TODO: adapt PDDL constructor for per-task use (problem_index, game_name from metadata)
-        raise NotImplementedError("PDDL.get_environment() needs constructor adaptation")
+        return PDDL(
+            problem_index=task_instance.metadata["problem_index"],
+            game_name=task_instance.metadata["domain"],
+            difficulty=task_instance.difficulty or "easy",
+        )
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
         domain = task_instance.metadata["domain"]

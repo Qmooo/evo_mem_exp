@@ -118,13 +118,16 @@ class Scienceworld:
         if action == "check valid actions":
             valid_actions = ", ".join(self.get_action_space())
             observation = f"Choose an action from these valid actions: {valid_actions}"
-            return observation, self.reward, self.done, None
+            return observation, self.reward, self.done, {"success": self.done, "progress": self.reward}
         else:
             observation, _, _, info = self.env.step(action)
             if self.selected_obs:
                 self._check_temperature_string(observation, self.selected_obs)
             self.reward = self.get_reward()
             self.done = self._check_is_done(self.selected_obs) if self.selected_obs else False
+            info = info or {}
+            info["success"] = self.done
+            info["progress"] = self.reward
             return observation, self.reward, self.done, info
 
     def get_action_space(self, abstract=True):
@@ -158,6 +161,8 @@ class Scienceworld:
     def reset(self):
         self.reward = 0.
         self.done = False
+        if self.selected_obs:
+            self.finished_sub_goal = [0 for _ in self.selected_obs]
         return self.env.reset()
 
     def _check_temperature_string(self, s, selected_obs):
@@ -246,8 +251,13 @@ class ScienceWorldDataset(MultiTurnDataset):
         return instances
 
     def get_environment(self, task_instance: TaskInstance) -> Scienceworld:
-        # TODO: adapt Scienceworld constructor for per-task use
-        raise NotImplementedError("Scienceworld.get_environment() needs constructor adaptation")
+        env = Scienceworld(envStepLimit=100)
+        env.load(
+            task_instance.metadata["task_name"],
+            task_instance.metadata["var_idx"],
+            simplificationStr="easy",
+        )
+        return env
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
         return (

@@ -221,6 +221,8 @@ class BabyAI:
         self.infos["history"] = self.history
         self.infos["steps"] = self.steps
         self.infos["state"] = self.states[-1]
+        self.infos["success"] = self.done
+        self.infos["progress"] = float(self.reward)
 
     def update_info(self, action, info):
         self.history.append(("action", action))
@@ -233,6 +235,8 @@ class BabyAI:
         self.infos["history"] = self.history
         self.infos["steps"] = self.steps
         self.infos["state"] = self.states[-1]
+        self.infos["success"] = self.done
+        self.infos["progress"] = float(self.reward)
 
     def get_next_pos(self, pos, action, dir):
         if action == 0:
@@ -529,6 +533,7 @@ class BabyAI:
         self.reward = 0
         self.points = 0
         self.done = False
+        return self.init_obs
 
     def verify_action(self, action, obs):
         if (obs["image"] != self.obs_2d).sum() > 0:
@@ -642,8 +647,11 @@ class BabyAIDataset(MultiTurnDataset):
         return instances
 
     def get_environment(self, task_instance: TaskInstance) -> BabyAI:
-        # TODO: adapt BabyAI constructor for per-task use
-        raise NotImplementedError("BabyAI.get_environment() needs constructor adaptation")
+        return BabyAI(
+            game_name=task_instance.metadata["subtask"],
+            obs_to_reward=task_instance.metadata.get("obs_to_reward"),
+            difficulty=task_instance.metadata.get("difficulty", "easy"),
+        )
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
         return (

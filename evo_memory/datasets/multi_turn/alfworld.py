@@ -220,6 +220,105 @@ class AlfWorld:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Single-game wrapper (per-task use with EvoMemMultiEnvironment)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SingleGameAlfWorld:
+    """Single textworld game env for per-task EvoMemMultiEnvironment use.
+
+    Loads one game file directly via textworld.gym rather than the batch
+    AlfWorld class, which requires scanning directories and a global config.
+    """
+
+    def __init__(self, game_file: str, subgoals: List[str], difficulty: str = "hard") -> None:
+        import textworld
+        import textworld.gym
+        from alfworld.agents.environment.alfred_tw_env import AlfredDemangler, AlfredInfos
+
+        self.game_file = game_file
+        self.sub_goal = subgoals
+        self.difficulty = difficulty
+        self.finished_sub_goal: List[float] = []
+        self.valid_actions: List[str] = []
+        self.init_obs = ""
+        self.env_ob = ""
+        self.reward = 0.0
+        self.isdone = False
+
+        request_infos = textworld.EnvInfos(won=True, admissible_commands=True, extras=["gamefile"])
+        env_id = textworld.gym.register_games(
+            [game_file],
+            request_infos,
+            batch_size=1,
+            asynchronous=False,
+            max_episode_steps=50,
+            wrappers=[AlfredDemangler, AlfredInfos],
+        )
+        self._env = textworld.gym.make(env_id)
+
+    def reset(self) -> str:
+        ob, info = self._env.reset()
+        self.valid_actions = info["admissible_commands"][0]
+        lines = "\n".join(ob[0].split("\n\n")[1:]).split("\n")
+        self.init_obs = lines[0] if lines else ob[0]
+        self.env_ob = self.init_obs
+        self.finished_sub_goal = [0.0] * (len(self.sub_goal) + 1)
+        self.reward = 0.0
+        self.isdone = False
+        return self.init_obs
+
+    def _process_ob(self, ob: str) -> str:
+        if ob.startswith("You arrive at loc "):
+            ob = ob[ob.find(". ") + 2:]
+        return ob
+
+    def _get_reward(self) -> float:
+        if self.isdone:
+            return 1.0
+        denom = len(self.finished_sub_goal)
+        return sum(self.finished_sub_goal) / denom if denom else 0.0
+
+    def _check_subgoals(self, obs: str) -> None:
+        for i, pattern in enumerate(self.sub_goal):
+            if re.search(pattern, obs):
+                self.finished_sub_goal[i] = 1.0
+
+    def get_action_space(self) -> List[str]:
+        actions = list(self.valid_actions)
+        if "look" not in actions:
+            actions.append("look")
+        if "check valid actions" not in actions:
+            actions.append("check valid actions")
+        return actions
+
+    def step(self, action: str) -> Tuple[str, float, bool, Dict[str, Any]]:
+        if action.endswith("."):
+            action = action[:-1]
+
+        if action == "check valid actions":
+            valid = ", ".join(self.get_action_space())
+            obs = f"Choose an action from these valid actions: {valid}"
+            return obs, self.reward, self.isdone, {"success": self.isdone, "progress": self.reward}
+
+        observation, _, done_list, info = self._env.step([action])
+        done = done_list[0]
+
+        if info and "admissible_commands" in info:
+            self.valid_actions = info["admissible_commands"][0]
+
+        obs = self._process_ob(observation[0])
+        if "go to" in action or "open" in action:
+            if "Nothing happens" not in obs:
+                self.env_ob = obs
+
+        self._check_subgoals(obs)
+        self.isdone = done
+        self.reward = self._get_reward()
+
+        return obs, self.reward, done, {"success": done, "progress": self.reward}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dataset
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -307,9 +406,12 @@ class AlfWorldDataset(MultiTurnDataset):
                 ))
         return instances
 
-    def get_environment(self, task_instance: TaskInstance) -> AlfWorld:
-        # TODO: adapt AlfWorld constructor for per-task use
-        raise NotImplementedError("AlfWorld.get_environment() needs constructor adaptation")
+    def get_environment(self, task_instance: TaskInstance) -> SingleGameAlfWorld:
+        return SingleGameAlfWorld(
+            game_file=task_instance.metadata["game_file"],
+            subgoals=task_instance.metadata.get("subgoals", []),
+            difficulty=task_instance.metadata.get("difficulty", "hard"),
+        )
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
         return (
