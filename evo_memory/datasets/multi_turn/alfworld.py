@@ -30,7 +30,7 @@ from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
 
 _AGENTBOARD_DEFAULT = os.environ.get(
     "AGENTBOARD_DATA_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "data", "agentboard", "data"),
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "data", "agentboard", "data"),
 )
 
 # folder prefix → canonical task type key

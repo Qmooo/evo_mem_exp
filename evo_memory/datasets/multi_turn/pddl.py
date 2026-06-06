@@ -24,7 +24,7 @@ from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
 
 _AGENTBOARD_DEFAULT = os.environ.get(
     "AGENTBOARD_DATA_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "data", "agentboard", "data"),
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "data", "agentboard", "data"),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,7 +285,8 @@ class PDDL:
             return self._get_obs(), self.reward, self.done, self.infos
         action_literal = self.text_to_action(action)
         if action_literal is not None:
-            obs_temp, reward, done, infos = self.env.step(action_literal)
+            obs_temp, reward, terminated, truncated, infos = self.env.step(action_literal)
+            done = terminated or truncated
             reward = max(self.reward, self.constraint_satisfaction_metric(obs_temp.literals, self.goal_literals))
             if obs_temp == self.last_obs:
                 obs = "The action is not valid and therefore takes no effect. Please remember to satisfy the restriction of actions. You can also check valid actions."

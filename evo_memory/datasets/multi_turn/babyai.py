@@ -18,12 +18,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import gymnasium
+import minigrid
+minigrid.register_minigrid_envs()  # registers BabyAI-* environments into gymnasium
 
 from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
 
 _AGENTBOARD_DEFAULT = os.environ.get(
     "AGENTBOARD_DATA_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "data", "agentboard", "data"),
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "data", "agentboard", "data"),
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +120,7 @@ class BabyAI:
         self.seed = seed
         self.game_config = game_config
         self.env = gymnasium.make(game_name)
+        self._inner = self.env.unwrapped  # direct access to minigrid internals
         self.render_path = render_path
         self.need_render = need_render
         self.obs_to_reward = obs_to_reward
@@ -294,11 +297,11 @@ class BabyAI:
         return None
 
     def postprocess_obs(self, obs):
-        _, vis_mask = self.env.gen_obs_grid()
-        view_size = self.env.agent_view_size
-        pos = self.env.agent_pos
-        f_vec = self.env.dir_vec
-        r_vec = self.env.right_vec
+        _, vis_mask = self._inner.gen_obs_grid()
+        view_size = self._inner.agent_view_size
+        pos = self._inner.agent_pos
+        f_vec = self._inner.dir_vec
+        r_vec = self._inner.right_vec
         top_left = pos + f_vec * (view_size - 1) - r_vec * (view_size // 2)
         vecs = - f_vec + r_vec
         boarders = top_left + view_size * vecs
@@ -370,7 +373,7 @@ class BabyAI:
             barrier_dis_pos = all_barriers[0]["dis"]
             barrier_description += "You are facing a " + all_barriers[0]["name"] + " " + str(barrier_dis_pos) + " steps away. "
         carry_description = ""
-        carrying = self.env.carrying
+        carrying = self._inner.carrying
         if carrying is not None:
             carry_description = "You are carrying a " + carrying.color + " " + carrying.type + "."
         else:
@@ -512,7 +515,7 @@ class BabyAI:
             self.obs_to_reward = self.store_all_obs_to_reward.copy()
         else:
             self.obs_to_reward = None
-        self.goal = self.env.mission
+        self.goal = self._inner.mission
         if "then" in self.goal:
             self.goal = self.goal.replace("then", "and")
         if "after you" in self.goal:
