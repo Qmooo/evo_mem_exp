@@ -190,8 +190,8 @@ def main():
     parser = argparse.ArgumentParser(description="Download single-turn Evo-Memory datasets")
     parser.add_argument(
         "--output-dir", "-o",
-        default="./data",
-        help="Output directory (default: ./data)",
+        default="./data/single_turn",
+        help="Output directory (default: ./data/single_turn)",
     )
     parser.add_argument(
         "--datasets", "-d",

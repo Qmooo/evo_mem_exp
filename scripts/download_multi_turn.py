@@ -118,13 +118,6 @@ def download_agentboard_data(output_dir: Path, datasets: set) -> bool:
 
         print(f"  Extracted {len(extracted)} file(s) to {output_dir}")
 
-        if "alfworld" in datasets:
-            print(
-                "\n  AlfWorld game files are NOT included in the tarball.\n"
-                "  Download them separately after installing alfworld:\n"
-                f"    alfworld-download --data-dir {output_dir / 'alfworld'}"
-            )
-
         return True
 
     except Exception as e:
@@ -133,19 +126,14 @@ def download_agentboard_data(output_dir: Path, datasets: set) -> bool:
 
 
 def main():
-    default_output = os.environ.get("AGENTBOARD_DATA_PATH", "./data")
-
     parser = argparse.ArgumentParser(
         description="Download multi-turn AgentBoard data for Evo-Memory",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--output-dir", "-o",
-        default=default_output,
-        help=(
-            "Output directory (default: $AGENTBOARD_DATA_PATH or ./data). "
-            "Should match the value the dataset classes read from."
-        ),
+        default="./data/multi_turn",
+        help="Output directory for AgentBoard data (default: ./data/multi_turn).",
     )
     parser.add_argument(
         "--datasets", "-d",
@@ -173,13 +161,6 @@ def main():
     print("\n" + "=" * 60)
     if success:
         print("Download complete.")
-        print(
-            "\nNext steps:\n"
-            "  1. Set AGENTBOARD_DATA_PATH to the output directory above.\n"
-            "  2. Install multi-turn backends:  uv pip install 'evo-memory[multi_turn]'\n"
-            "  3. AlfWorld game files (if needed):  "
-            f"alfworld-download --data-dir {output_dir / 'alfworld'}"
-        )
     else:
         print("Download failed. Check the error above.")
         sys.exit(1)
