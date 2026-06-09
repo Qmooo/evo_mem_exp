@@ -2,8 +2,18 @@
 
 Four PDDL planning domains: gripper, blocks, barman, tyreworld.
 
-Requires:
-    pip install pddlgym nltk
+Requires (Python ≤ 3.11 only):
+    pip install pddlgym==0.0.7 nltk
+
+Python 3.12 compatibility note:
+    pddlgym==0.0.7 is NOT compatible with Python 3.12 due to two issues:
+      1. Depends on `gym` (legacy OpenAI gym), which is unmaintained and
+         does not support Python 3.12.
+      2. Depends on pillow<10; no pre-built wheel exists for Python 3.12
+         (source build requires libjpeg headers: apt install libjpeg-dev).
+    The fork `pddlgymnasium` does not resolve this — it downgrades both
+    pillow and gymnasium, breaking alfworld/minigrid/scienceworld backends.
+    PDDLDataset falls back to None on Python 3.12 (see multi_turn/__init__.py).
 
 Data path (set via env var or pass data_path=):
     AGENTBOARD_DATA_PATH=/path/to/agentboard/data

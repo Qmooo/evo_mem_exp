@@ -27,6 +27,9 @@ setup(
         "Programming Language :: Python :: 3.11",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    # NOTE: full functionality (including PDDLDataset) requires Python < 3.12.
+    # pddlgym==0.0.7 depends on legacy `gym` and pillow<10, both incompatible
+    # with Python 3.12+. All other backends work on Python 3.8–3.13.
     python_requires=">=3.8",
     install_requires=[
         "numpy>=1.21.0",
@@ -36,6 +39,8 @@ setup(
         "sentence-transformers>=2.2.0",
         "datasets>=2.14.0",
         "scikit-learn>=1.3.0",
+        "jsonlines",
+        "nltk",
     ],
     extras_require={
         "dev": [
@@ -46,10 +51,22 @@ setup(
         ],
         "anthropic": ["anthropic>=0.18.0"],
         "google": ["google-generativeai>=0.3.0"],
+        "multi_turn": [
+            "alfworld==0.4.2",
+            "minigrid==2.3.0",
+            "gymnasium",
+            "scienceworld==1.2.3",
+            "pddlgym==0.0.7; python_version < '3.12'",
+        ],
         "all": [
             "anthropic>=0.18.0",
             "google-generativeai>=0.3.0",
             "faiss-cpu>=1.7.0",
+            "alfworld==0.4.2",
+            "minigrid==2.3.0",
+            "gymnasium",
+            "scienceworld==1.2.3",
+            "pddlgym==0.0.7; python_version < '3.12'",
         ],
     },
     entry_points={
