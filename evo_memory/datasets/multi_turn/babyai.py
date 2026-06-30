@@ -76,7 +76,7 @@ all_levels = {
 }
 
 IDX_TO_ACTION = {0: "left", 1: "right", 2: "forward", 3: "pickup", 4: "drop", 5: "toggle", 6: "done"}
-ACTION_TO_IDX = {"left": 0, "right": 1, "forward": 2, "pickup": 3, "drop": 4, "toggle": 5, "done": 6}
+ACTION_TO_IDX = {v: k for k, v in IDX_TO_ACTION.items()}
 
 IDX_TO_OBJECT = {
     0: "unseen", 1: "empty", 2: "wall", 3: "floor", 4: "door",
@@ -85,10 +85,10 @@ IDX_TO_OBJECT = {
 OBJECT_TO_IDX = {v: k for k, v in IDX_TO_OBJECT.items()}
 
 STATE_TO_IDX = {"open": 0, "closed": 1, "locked": 2}
-IDX_TO_STATE = {0: "open", 1: "closed", 2: "locked"}
+IDX_TO_STATE = {v: k for k, v in STATE_TO_IDX.items()}
 
 COLOR_TO_IDX = {"red": 0, "green": 1, "blue": 2, "purple": 3, "yellow": 4, "grey": 5}
-IDX_TO_COLOR = {0: "red", 1: "green", 2: "blue", 3: "purple", 4: "yellow", 5: "grey"}
+IDX_TO_COLOR = {v: k for k, v in COLOR_TO_IDX.items()}
 
 DIR_TO_VEC = [
     np.array((1, 0)),   # right
@@ -318,7 +318,6 @@ class BabyAI:
         grid = obs["image"]
         dir = obs["direction"]
         all_objs = []
-        left_dis = 0
         all_barriers = []
         for vis_j in range(0, view_size):
             for vis_i in range(0, view_size):
@@ -641,7 +640,6 @@ class BabyAIDataset(MultiTurnDataset):
                         "init_obs": ai.get("init_obs", ""),
                         "subgoals": rec["subgoals"] if isinstance(rec["subgoals"], list)
                                     else [s.strip() for s in rec["subgoals"].split("\n") if s.strip()],
-                        "obs_to_reward": ai.get("obs_to_reward", None),
                         "difficulty": rec.get("difficulty", "easy"),
                     },
                     difficulty=rec.get("difficulty"),
@@ -652,7 +650,7 @@ class BabyAIDataset(MultiTurnDataset):
     def get_environment(self, task_instance: TaskInstance) -> BabyAI:
         return BabyAI(
             game_name=task_instance.metadata["subtask"],
-            obs_to_reward=task_instance.metadata.get("obs_to_reward"),
+            obs_to_reward=task_instance.metadata.get("subgoals"),
             difficulty=task_instance.metadata.get("difficulty", "easy"),
         )
 
