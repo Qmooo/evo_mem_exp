@@ -626,17 +626,29 @@ class BabyAIDataset(MultiTurnDataset):
                 "Set AGENTBOARD_DATA_PATH or pass data_path= to BabyAIDataset."
             )
         instances = []
+        # AgentBoard generates 4 tasks per level, each with a distinct random
+        # mission produced by reset(seed=1234 + within-level index 0..3). The
+        # source test.jsonl does not store the seed, so we reconstruct it from a
+        # per-subtask running counter (the tasks of one level are consecutive).
+        # Without this, get_environment would fall back to seed 1234 for every
+        # task, collapsing all 4 missions of a level onto seed 1234's mission and
+        # making 3 of every 4 tasks unsolvable (env goal != displayed goal).
+        seed_counter: Dict[str, int] = {}
         with open(self.data_path) as f:
             for line in f:
                 rec = json.loads(line)
                 ai = rec.get("additional_info", {})
+                subtask = ai["subtask"]
+                within_level_index = seed_counter.get(subtask, 0)
+                seed_counter[subtask] = within_level_index + 1
                 instances.append(TaskInstance(
                     task_id=f"babyai_{rec['id']}",
                     input_text=rec["goal"],
                     target="success",
                     metadata={
                         "id": rec["id"],
-                        "subtask": ai["subtask"],
+                        "subtask": subtask,
+                        "seed": 1234 + within_level_index,
                         "init_obs": ai.get("init_obs", ""),
                         "subgoals": rec["subgoals"] if isinstance(rec["subgoals"], list)
                                     else [s.strip() for s in rec["subgoals"].split("\n") if s.strip()],
@@ -650,6 +662,7 @@ class BabyAIDataset(MultiTurnDataset):
     def get_environment(self, task_instance: TaskInstance) -> BabyAI:
         return BabyAI(
             game_name=task_instance.metadata["subtask"],
+            seed=task_instance.metadata.get("seed", 1234),
             obs_to_reward=task_instance.metadata.get("subgoals"),
             difficulty=task_instance.metadata.get("difficulty", "easy"),
         )
