@@ -19,8 +19,6 @@ import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-import jsonlines
-
 from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
 
 _AGENTBOARD_DEFAULT = os.environ.get(
@@ -62,48 +60,25 @@ def _build_goal_map(data_dir: str) -> Dict[str, Tuple[str, int]]:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AgentBoard Scienceworld environment class (copied; registry/pdb/
-# label_path loading stripped; from_config removed)
+# label_path/from_config removed — subgoals wired in via get_environment)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Scienceworld:
     def __init__(self,
                  serverPath=None,
                  envStepLimit=100,
-                 label_path=''
                  ):
         from scienceworld import ScienceWorldEnv
         self.env = ScienceWorldEnv("", serverPath, envStepLimit=envStepLimit)
         self.reward = 0.
         self.done = False
-        self.label_path = label_path
-        self.labels = {}
-        self.cur_label = None
-        self.modified_goal = ''
+        # subgoals (regex patterns) are wired in by the dataset's get_environment;
+        # finished_sub_goal is the parallel binary completion array
         self.selected_obs = ''
         self.finished_sub_goal = []
-        if label_path:
-            with open(self.label_path, 'r+', encoding='utf-8') as f:
-                for item in jsonlines.Reader(f):
-                    task_name = item["additional_info"]["env_name"]
-                    var = item["additional_info"]["var"]
-                    self.labels[f"{task_name}_{var}"] = {
-                        "task_name": task_name,
-                        "var": var,
-                        "modified_goal": item["goal"],
-                        "subgoals": item['subgoals'],
-                        "difficulty": item["difficulty"],
-                    }
 
     def load(self, task_name, var, simplificationStr):
-        env = self.env.load(task_name, var, simplificationStr=simplificationStr)
-        if self.labels:
-            self.cur_label = self.labels.get(f"{task_name}_{var}")
-            if self.cur_label:
-                self.selected_obs = self.cur_label["subgoals"]
-                self.modified_goal = self.cur_label["modified_goal"]
-                self.difficulty = self.cur_label["difficulty"]
-                self.finished_sub_goal = [0 for i in range(len(self.selected_obs))]
-        return env
+        return self.env.load(task_name, var, simplificationStr=simplificationStr)
 
     def inventory(self):
         return self.env.inventory()
@@ -257,6 +232,10 @@ class ScienceWorldDataset(MultiTurnDataset):
             task_instance.metadata["var_idx"],
             simplificationStr="easy",
         )
+        # Wire subgoal regex patterns into the env so step() can track progress.
+        # Without this, selected_obs stays empty and progress is stuck at 0.0.
+        env.selected_obs = task_instance.metadata["subgoals"]
+        env.finished_sub_goal = [0 for _ in env.selected_obs]
         return env
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
