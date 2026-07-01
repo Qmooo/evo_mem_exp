@@ -1,9 +1,12 @@
 """PDDL dataset – AgentBoard env class (pddlgym-based) + evo_mem streaming adapter.
 
-Four PDDL planning domains: gripper, blocks, barman, tyreworld.
+Four PDDL planning domains: gripper, blockworld, barman, tyreworld.
 
-Requires (Python ≤ 3.11 only):
-    pip install pddlgym==0.0.7 nltk
+pddlgym is vendored from AgentBoard (_vendor/pddlgym/) and shadows any pip
+pddlgym at import time; do NOT `pip install pddlgym` (the pip package lacks the
+custom domains above). Still requires `nltk` and legacy `gym`.
+
+Legacy note (kept for context):
 
 Python 3.12 compatibility note:
     pddlgym==0.0.7 is NOT compatible with Python 3.12 due to two issues:
@@ -27,6 +30,18 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import nltk
+
+# Use the vendored AgentBoard pddlgym fork (bundled under _vendor/), NOT the pip
+# package. Only the fork registers the custom domains this dataset needs
+# (gripper / blockworld / barman / tyreworld) with the exact problem instances
+# the recorded goals were generated from. The pip pddlgym lacks these domains,
+# so 40/60 tasks fail to build and gripper's problem set does not match. The
+# fork imports itself as top-level ``pddlgym``, so its parent dir is prepended
+# to sys.path to shadow any pip-installed pddlgym.
+import sys as _sys
+_VENDOR_DIR = os.path.join(os.path.dirname(__file__), "_vendor")
+if _VENDOR_DIR not in _sys.path:
+    _sys.path.insert(0, _VENDOR_DIR)
 import pddlgym
 from pddlgym.structs import Literal, Predicate
 
@@ -273,6 +288,13 @@ class PDDL:
         return self.init_obs
 
     def constraint_satisfaction_metric(self, obs_literals, goal_literals):
+        # Progress = fraction of the problem's formal goal literals currently
+        # satisfied by the world state. goal_literals come from obs.goal.literals
+        # (the pddlgym problem's :goal) — the SAME source rendered into the goal
+        # text shown to the agent, so reward is measured against the displayed
+        # goal itself. NOTE: the dataset `subgoals` field is intentionally NOT
+        # used for PDDL reward (unlike babyai/alfworld); the formal goal-literal
+        # check is stricter and always consistent with the instruction.
         satisfied = 0
         all = 0
         for literal in goal_literals:
@@ -295,8 +317,10 @@ class PDDL:
             return self._get_obs(), self.reward, self.done, self.infos
         action_literal = self.text_to_action(action)
         if action_literal is not None:
-            obs_temp, reward, terminated, truncated, infos = self.env.step(action_literal)
-            done = terminated or truncated
+            # The vendored AgentBoard pddlgym is built on legacy gym, whose
+            # step() returns a 4-tuple (obs, reward, done, info) — NOT the
+            # gymnasium 5-tuple (obs, reward, terminated, truncated, info).
+            obs_temp, reward, done, infos = self.env.step(action_literal)
             reward = max(self.reward, self.constraint_satisfaction_metric(obs_temp.literals, self.goal_literals))
             if obs_temp == self.last_obs:
                 obs = "The action is not valid and therefore takes no effect. Please remember to satisfy the restriction of actions. You can also check valid actions."
