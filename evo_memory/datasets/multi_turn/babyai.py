@@ -208,9 +208,13 @@ class BabyAI:
             self.update_reward(new_obs)
         else:
             self.reward = reward
-        if self.done:
-            if self.reward <= 0.5:
-                self.done = False
+        # NOTE: previously done was demoted to False when reward <= 0.5, even
+        # after the env itself signalled done. That decoupled the "task
+        # completed" text (appended above on raw done) from the returned done
+        # flag, so the executor never terminated and looped to the step limit.
+        # We now trust the env's done signal; reward is still reported as
+        # progress. reward == 1 can additionally promote done when the env has
+        # not signalled it yet.
         if self.reward == 1 and not self.done:
             self.done = True
             new_obs += "\n The task is completed."
