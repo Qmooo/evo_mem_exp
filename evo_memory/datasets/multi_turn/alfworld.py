@@ -262,7 +262,7 @@ class SingleGameAlfWorld:
         lines = "\n".join(ob[0].split("\n\n")[1:]).split("\n")
         self.init_obs = lines[0] if lines else ob[0]
         self.env_ob = self.init_obs
-        self.finished_sub_goal = [0.0] * (len(self.sub_goal) + 1)
+        self.finished_sub_goal = [0.0] * len(self.sub_goal)
         self.reward = 0.0
         self.isdone = False
         return self.init_obs
@@ -273,8 +273,9 @@ class SingleGameAlfWorld:
         return ob
 
     def _get_reward(self) -> float:
-        if self.isdone:
-            return 1.0
+        # Progress purely reflects subgoal completion: fraction of subgoal regex
+        # patterns matched. No isdone→1.0 override (that hard-coded a full score on
+        # the env's done flag regardless of how many subgoals actually matched).
         denom = len(self.finished_sub_goal)
         return sum(self.finished_sub_goal) / denom if denom else 0.0
 
