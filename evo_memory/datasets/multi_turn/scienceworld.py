@@ -26,6 +26,12 @@ _AGENTBOARD_DEFAULT = os.environ.get(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "data", "agentboard", "data"),
 )
 
+# AgentBoard scienceworld simplifications (build_simplification_str): 4 flags WITHOUT
+# teleportAction, so navigation difficulty is preserved. Using "easy" would enable all 6
+# flags (incl. teleportAction), letting the agent teleport and trivializing navigation —
+# diverging from the AgentBoard baseline.
+_SIMPLIFICATION_STR = "selfWateringFlowerPots,openContainers,openDoors,noElectricalAction"
+
 
 def _build_goal_map(data_dir: str) -> Dict[str, Tuple[str, int]]:
     """Build goal_text → (task_name, var_idx) by iterating all ScienceWorld test variations.
@@ -42,14 +48,14 @@ def _build_goal_map(data_dir: str) -> Dict[str, Tuple[str, int]]:
 
     goal_map: Dict[str, Tuple[str, int]] = {}
     dummy = ScienceWorldEnv("boil", envStepLimit=1)
-    task_names = dummy.getTaskNames()
+    task_names = dummy.get_task_names()
 
     for task_name in task_names:
         env = ScienceWorldEnv(task_name, envStepLimit=1)
-        for var_idx in env.getVariationsTest():
+        for var_idx in env.get_variations_test():
             env.load(task_name, var_idx)
             env.reset()
-            goal = env.getTaskDescription().strip()
+            goal = env.get_task_description().strip()
             if goal not in goal_map:
                 goal_map[goal] = (task_name, var_idx)
 
@@ -108,11 +114,11 @@ class Scienceworld:
     def get_action_space(self, abstract=True):
         svalid_actions = []
         if abstract:
-            for a in self.env.getPossibleActions():
+            for a in self.env.get_possible_actions():
                 if "reset" not in a:
                     svalid_actions.append(a)
         else:
-            valid_actions = self.env.getValidActionObjectCombinationsWithTemplates()
+            valid_actions = self.env.get_valid_action_object_combinations_with_templates()
             forbidden_words = ["teleport", "connect", "dunk", "eat", "flush", "close door"]
             for valid_action in valid_actions:
                 v = valid_action['action']
@@ -125,20 +131,24 @@ class Scienceworld:
         return svalid_actions
 
     def getTaskDescription(self):
-        return self.env.getTaskDescription()
+        return self.env.get_task_description()
 
     def getGoalProgressStr(self):
-        return self.env.getGoalProgressStr()
+        return self.env.get_goal_progress()
 
     def getGoldActionSequence(self):
-        return self.env.getGoldActionSequence()
+        return self.env.get_gold_action_sequence()
 
     def reset(self):
         self.reward = 0.
         self.done = False
         if self.selected_obs:
             self.finished_sub_goal = [0 for _ in self.selected_obs]
-        return self.env.reset()
+        # ScienceWorldEnv.reset() returns a Jericho-style (observation, info) tuple where
+        # info carries a huge `valid` action list. Drop info and append inventory to the
+        # observation, matching AgentBoard's init_obs construction.
+        obs, _info = self.env.reset()
+        return f"{obs}\n{self.env.inventory()}"
 
     def _check_temperature_string(self, s, selected_obs):
         for i, pattern in enumerate(selected_obs):
@@ -230,7 +240,7 @@ class ScienceWorldDataset(MultiTurnDataset):
         env.load(
             task_instance.metadata["task_name"],
             task_instance.metadata["var_idx"],
-            simplificationStr="easy",
+            simplificationStr=_SIMPLIFICATION_STR,
         )
         # Wire subgoal regex patterns into the env so step() can track progress.
         # Without this, selected_obs stays empty and progress is stuck at 0.0.
@@ -240,11 +250,42 @@ class ScienceWorldDataset(MultiTurnDataset):
 
     def get_environment_info(self, task_instance: TaskInstance) -> str:
         return (
-            "You are in a science lab simulator. Issue plain text commands like:\n"
-            "  move to kitchen / look around / pick up [object] / put [object] in [container]\n"
-            "  focus on [object] / heat [object] / cool [object] / mix [object] and [object]\n"
-            "Special command: 'check valid actions' to list available actions.\n"
-            "Type commands one at a time."
+            "You are an agent in a virtual science lab. Interact using these plain-text "
+            "commands ({OBJ} = object, {LOC} = location):\n"
+            "\n"
+            "Manipulation:\n"
+            "  open {OBJ} / close {OBJ}        open or close a container/door\n"
+            "  pick up {OBJ} / put down {OBJ}  add to / remove from inventory\n"
+            "  move {OBJ} to {OBJ}             transfer an object into a container/location\n"
+            "  pour {OBJ} into {OBJ}           pour a substance\n"
+            "  dunk {OBJ} into {OBJ}           immerse a container in a liquid\n"
+            "  mix {OBJ}                        chemically combine a container's contents\n"
+            "\n"
+            "Inspection:\n"
+            "  look around                     survey the current room\n"
+            "  look at {OBJ}                   examine an object\n"
+            "  look in {OBJ}                   peek inside a container\n"
+            "  read {OBJ}                      read written content\n"
+            "\n"
+            "Devices:\n"
+            "  activate {OBJ} / deactivate {OBJ}   toggle a device (e.g. sink, stove)\n"
+            "  use {OBJ} [on {OBJ}]                use a device/item (e.g. thermometer on water)\n"
+            "\n"
+            "Movement:\n"
+            "  go to {LOC}                     move to a connected room\n"
+            "\n"
+            "Misc:\n"
+            "  focus on {OBJ}                  direct attention to a task-relevant object\n"
+            "  eat {OBJ} / flush {OBJ} / wait [DURATION]\n"
+            "\n"
+            "Information:\n"
+            "  task                            recap the current objective\n"
+            "  inventory                       list items you are carrying\n"
+            "\n"
+            "Special command: 'check valid actions' lists currently available actions.\n"
+            "If your action cannot be understood (e.g. the reply is 'Unknown action.' or "
+            "'No known action matches that input.'), the command was not recognized — issue "
+            "'check valid actions' to see the available actions, then choose one."
         )
 
     def evaluate(self, prediction: str, target: str) -> Dict[str, Any]:
