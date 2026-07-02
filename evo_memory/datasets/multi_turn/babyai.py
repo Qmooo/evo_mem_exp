@@ -131,7 +131,11 @@ class BabyAI:
                 self.num_obs_to_reward = len(self.obs_to_reward[0])
             else:
                 self.num_obs_to_reward = len(self.obs_to_reward)
-        self.reset()
+        # NOTE: do NOT reset() here. Contract: the caller resets exactly once
+        # after get_environment() (see EvoMemMultiEnvironment.setup and
+        # evaluator._evaluate_multi_turn). Auto-resetting in __init__ is
+        # redundant work and diverges from the alfworld/scienceworld env
+        # classes, which construct without resetting.
 
     def _get_info(self):
         return self.infos
