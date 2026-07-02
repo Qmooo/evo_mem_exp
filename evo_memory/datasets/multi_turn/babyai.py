@@ -300,7 +300,7 @@ class BabyAI:
                     graph[(new_pos, new_dir)] = ((pos, dir), action)
         return None
 
-    def postprocess_obs(self, obs):
+    def postprocess_obs(self, obs, build_actions=True):
         _, vis_mask = self._inner.gen_obs_grid()
         view_size = self._inner.agent_view_size
         pos = self._inner.agent_pos
@@ -382,6 +382,11 @@ class BabyAI:
         else:
             carry_description = "You are not carrying anything."
         description = obj_description + barrier_description + carry_description
+        # Cheap path: reward/subgoal matching only needs the rendered text, not
+        # the find_path BFS below. Skip action-space construction so per-substep
+        # scanning in step() does not re-run BFS at every low-level action.
+        if not build_actions:
+            return description, {}
         possible_actions = {"turn left": [0], "turn right": [1]}
         error_message = {}
         if len(all_barriers) == 0 or all_barriers[0]["dis"] > 1:
@@ -580,10 +585,22 @@ class BabyAI:
                 return self._get_obs(), self.reward, self.done, self.infos
             for action_step in action_list:
                 obs, reward, done, truncated, infos = self.env.step(action_step)
+                # Scan every low-level substep obs for subgoals: macros expand
+                # to primitive sequences via find_path, and transient states
+                # (e.g. a door shown "open" right after toggle, before going
+                # through it) only appear mid-macro. build_actions=False renders
+                # text without re-running the BFS.
+                if self.obs_to_reward is not None:
+                    sub_desc, _ = self.postprocess_obs(obs, build_actions=False)
+                    self.update_reward(sub_desc)
                 if not self.verify_action(action_step, obs):
                     break
-                else:
-                    self.obs_2d = obs["image"]
+                self.obs_2d = obs["image"]
+                # Stop as soon as the env signals done, so the trailing forward
+                # step of a "toggle and go through" macro cannot overwrite the
+                # done=True produced by the toggle that completes the task.
+                if done:
+                    break
             self.update(action, obs, reward, done, infos)
             self.infos["action_is_valid"] = True
             return self._get_obs(), self.reward, self.done, self.infos
