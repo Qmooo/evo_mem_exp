@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import gymnasium
@@ -202,26 +200,26 @@ class BabyAI:
     def update(self, action, obs, reward, done, infos):
         for k, v in infos.items():
             self.infos[k] = v
+        # Success signal: the RAW minigrid reward (this `reward` arg) is 0 on
+        # every step except the one that completes the whole mission, where
+        # RoomGridLevel emits _reward() > 0 (a failure-termination returns 0).
+        # So reward > 0 <=> task solved. This is independent of self.reward
+        # below, which for obs_to_reward tasks is overwritten with the subgoal
+        # progress fraction and would be > 0 on mere partial progress.
+        if reward > 0:
+            self.won = True
+        # done is the loop terminator: the minigrid episode is over (success OR
+        # failure) once terminated fires; there is no valid further step.
         self.done = done
         self.history.append(("action", action))
         self.history.append(("reward", reward))
         new_obs, new_action_space = self.postprocess_obs(obs)
-        if self.done:
+        if self.won:
             new_obs += "\n The task is completed."
         if self.obs_to_reward is not None:
             self.update_reward(new_obs)
         else:
             self.reward = reward
-        # NOTE: previously done was demoted to False when reward <= 0.5, even
-        # after the env itself signalled done. That decoupled the "task
-        # completed" text (appended above on raw done) from the returned done
-        # flag, so the executor never terminated and looped to the step limit.
-        # We now trust the env's done signal; reward is still reported as
-        # progress. reward == 1 can additionally promote done when the env has
-        # not signalled it yet.
-        if self.reward == 1 and not self.done:
-            self.done = True
-            new_obs += "\n The task is completed."
         self.history.append(("state", new_obs))
         self.states.append(new_obs)
         self.action_space = new_action_space
@@ -232,7 +230,7 @@ class BabyAI:
         self.infos["history"] = self.history
         self.infos["steps"] = self.steps
         self.infos["state"] = self.states[-1]
-        self.infos["success"] = self.done
+        self.infos["success"] = self.won
         self.infos["progress"] = float(self.reward)
 
     def update_info(self, action, info):
@@ -246,7 +244,8 @@ class BabyAI:
         self.infos["history"] = self.history
         self.infos["steps"] = self.steps
         self.infos["state"] = self.states[-1]
-        self.infos["success"] = self.done
+        # Meta / invalid actions do not step the real env, so won is unchanged.
+        self.infos["success"] = self.won
         self.infos["progress"] = float(self.reward)
 
     def get_next_pos(self, pos, action, dir):
@@ -548,6 +547,7 @@ class BabyAI:
         self.reward = 0
         self.points = 0
         self.done = False
+        self.won = False   # mission accomplished: minigrid emits reward>0 ONLY on full success
         return self.init_obs
 
     def verify_action(self, action, obs):
