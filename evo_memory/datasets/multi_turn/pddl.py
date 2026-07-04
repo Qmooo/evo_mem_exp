@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import nltk
 
@@ -143,10 +143,10 @@ description_map = {
     "blockworld": '''
     The robot has four actions: pickup, putdown, stack, and unstack. The domain assumes a world where there are a set of blocks that can be stacked on top of each other, an arm that can hold one block at a time, and a table where blocks can be placed.
     The actions defined in this domain include:
-    pickup <block>: allows the arm to pick up a block from the table if it is clear and the arm is empty. After the pickup action, the arm will be holding the block, and the block will no longer be on the table or clear.
-    putdown <block>: allows the arm to put down a block on the table if it is holding a block. After the putdown action, the arm will be empty, and the block will be on the table and clear.
-    stack <block> <block>: allows the arm to stack a block on top of another block if the arm is holding the top block and the bottom block is clear. After the stack action, the arm will be empty, the top block will be on top of the bottom block, and the bottom block will no longer be clear.
-    unstack <block> <block>: allows the arm to unstack a block from on top of another block if the arm is empty and the top block is clear. After the unstack action, the arm will be holding the top block, the top block will no longer be on top of the bottom block, and the bottom block will be clear.
+    pickup <block>: allows the arm to pick up a block from the table.
+    putdown <block>: allows the arm to put down a block on the table.
+    stack <block> <block>: allows the arm to stack a block on top of another block.
+    unstack <block> <block>: allows the arm to unstack a block from on top of another block.
     "check valid actions" is itself a valid action: take the action "check valid actions" to list the actions available in the current state.
     ''',
     "barman": '''
@@ -164,52 +164,32 @@ description_map = {
     clean-shaker <hand1> <hand2> <shaker>: Clean a shaker
     shake <cocktail> <ingredient1> <ingredient2> <shaker> <hand1> <hand2>: Shake a cocktail in a shaker
     pour-shaker-to-shot <beverage> <shot> <hand> <shaker> <level1> <level2>: Pour a beverage from a shaker to a shot glass from level1 to level2
-
-    You have the following restrictions on your actions:
-    You can only grasp a container if your hand is empty and it is on the table.
-    You can only leave a container if you are holding it.
-    You can only fill a shot glass if you are holding the shot glass, your other hand is empty, the shot glass is empty and clean.
-    You can only refill a shot glass if you are holding the shot glass, your other hand is empty, the shot glass is empty and has contained the saree ingredient before.
-    You can only empty a shot glass if you are holding the shot glass and it contains a beverage.
-    You can only pour from a shot glass to a clean shaker if you are holding the shot glass, the shot glass contains an ingredient, and the shaker is empty and clean.
-    You can only pour from a shot glass to a used shaker if you are holding the shot glass, the shot glass contains an ingredient, the shaker is unshaked and at a level not full.
-    You can only empty a shaker if you are holding the shaker and the shaker contains a shaked beverage.
-    You can only clean a shaker if you are holding the shaker, your other hand is empty, and the shaker is empty.
-    You can only shake a cocktail if you are holding the shaker, your other hand is empty, the shaker is unshaked, and the shaker contains two ingredients, and both ingredients are parts of a cocktail.
-    You can only pour from a shaker to a shot glass if you are holding the shaker, the shaker contains the cocktail, the shaker is shaked, and the shot glass is empty and clean.
-
-    Once you grasp a container, you are holding the container and the container is not on the table.
-    Once you leave a container on the table, your hand become empty.
-    Once you pour an ingredient from a shot glass to a shaker, the shaker contains the ingredient and is at one level above the previous level, and the shot glass becomes empty.
-    Once you empty a shaker, the shaker is at the empty level.
-    Once you shake, the two ingredients in the shaker become a cocktail.
-    Once you pour from a shaker to a shot glass, the shot glass contains the beverage in the shaker, the shot glass is no longer clean and empty, and the shaker is at one level below the previous level.
     "check valid actions" and "look around" are themselves valid actions: take the action "check valid actions" to list the actions available in the current state, or "look around" to re-print the full current state.
     ''',
     "gripper": '''
     You are a robot with a gripper that can move objects between different rooms.
     There are three actions defined in this domain:
-    move <room1> <room2>: This action allows the robot to move from one room to another.The action has a single precondition, which is that the robot is currently in a room. The effect of this action is to move the robot to another room and to remove the fact that it is in the original room.
-    pick <obj> <room> <gripper>: This action allows the robot to pick up an object using the gripper. The action has three preconditions: (1) the object is located in a room (2) the robot is currently in the same room and (3) the gripper is free (i.e., not holding any object). The effect of this action is to update the state of the world to show that the robot is carrying the object using the gripper, the object is no longer in the room, and the gripper is no longer free.
-    drop <obj> <room> <gripper>: This action allows the robot to drop an object that it is carrying. The action has two preconditions: (1) the robot is currently carrying the object using the gripper, and (2) the robot is currently in a room. The effect of this action is to update the state of the world to show that the robot is no longer carrying the object using the gripper, the object is now located in the room, and the gripper is now free.
+    move <room1> <room2>: allows the robot to move from one room to another.
+    pick <obj> <room> <gripper>: allows the robot to pick up an object using the gripper.
+    drop <obj> <room> <gripper>: allows the robot to drop an object that it is carrying.
     "check valid actions" is itself a valid action: take the action "check valid actions" to list the actions available in the current state.
     ''',
     "tyreworld": '''
     Your goal is to replace flat tyres with intact tyres on the hubs. Intact tyres should be inflated. The nuts should be tight on the hubs. The flat tyres, wrench, jack, and pump should be in the boot. The boot should be closed.
     There are 13 actions defined in this domain:
-    open <container>: The precondition for this action is that the container is unlocked and closed. The effect of this action is that the container is open and not closed.
-    close <container>: The precondition for this action is that the container is open. The effect of this action is that the container is closed and not open.
-    fetch <object> <container>: The precondition for this action is that the object is inside the container and the container is open. The effect of this action is that the object is held by the agent and not inside the container.
-    put-away <object> <container>: The precondition for this action is that the object is held by the agent and the container is open. The effect of this action is that the object is inside the container and not held by the agent.
-    loosen <nut> <hub>: The precondition for this action is that the agent has a wrench, the nut on hub is tight, and the hub is on the ground. The effect of this action is that the nut on hub is loose and not tight.
-    tighten <nut> <hub>: The precondition for this action is that the agent has a wrench, the nut on hub is loose, and the hub is on the ground. The effect of this action is that the nut on hub is tight and not loose.
-    jack-up <hub>: This action represents the process of lifting a hub off the ground using a jack. It requires the agent to have a jack and for the hub to be on the ground. After performing this action, the hub will no longer be on the ground and the agent will no longer have the jack.
-    jack-down <hub>: This action represents the process of lowering a hub back to the ground from an elevated position using a jack. It requires the agent to have the hub off the ground. After performing this action, the hub will be back on the ground and the agent will have the jack.
-    undo <nut> <hub>: This action undo the fastening of a nut on a hub. The preconditions are the hub is not on the ground (i.e., it has been jacked up), the hub is fastened, the agent has a wrench and the nut is loose. The effects are the agent has the nut, the hub is unfastened, the hub is no longer loose and the hub is not fastened anymore.
-    do-up <nut> <hub>: This action fasten a nut on a hub. The preconditions are the agent has a wrench, the hub is unfastened, the hub is not on the ground (i.e., it has been jacked up) and the agent has the nut to be fastened. The effects are the nut is now loose on the hub, the hub is fastened, the hub is no longer unfastened and the agent no longer has the nut.
-    remove-wheel <wheel> <hub>: This action removes a wheel from a hub. It can only be performed if the hub is not on the ground, the wheel is currently on the hub, and the hub is unfastened. After the action is performed, the agent will have the removed wheel and the hub will be free, meaning that the wheel is no longer on the hub.
-    put-on-wheel <wheel> <hub>: This action puts a wheel onto a hub. It can only be performed if the agent has the wheel, the hub is free, the hub is unfastened, and the hub is not on the ground. After the action is performed, the wheel will be on the hub, the hub will no longer be free, and the agent will no longer have the wheel.
-    inflate <wheel>: This action inflates a wheel using a pump. It can only be performed if the agent has a pump, the wheel is not inflated, and the wheel is intact. After the action is performed, the wheel will be inflated.
+    open <container>: open a container.
+    close <container>: close a container.
+    fetch <object> <container>: take an object out of a container.
+    put-away <object> <container>: put an object into a container.
+    loosen <nut> <hub>: loosen a nut on a hub.
+    tighten <nut> <hub>: tighten a nut on a hub.
+    jack-up <hub>: lift a hub off the ground with a jack.
+    jack-down <hub>: lower a hub back to the ground with a jack.
+    undo <nut> <hub>: remove a nut from a fastened hub.
+    do-up <nut> <hub>: fasten a nut onto a hub.
+    remove-wheel <wheel> <hub>: remove a wheel from a hub.
+    put-on-wheel <wheel> <hub>: put a wheel onto a hub.
+    inflate <wheel>: inflate a wheel with a pump.
     "check valid actions" and "look around" are themselves valid actions: take the action "check valid actions" to list the actions available in the current state, or "look around" to re-print the full current state.
     ''',
 }
