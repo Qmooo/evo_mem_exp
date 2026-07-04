@@ -7,17 +7,16 @@ Data path (set via env var or pass data_path=):
     AGENTBOARD_DATA_PATH=/path/to/agentboard/data
     → expects $AGENTBOARD_DATA_PATH/scienceworld/test.jsonl
 
-Goal→(task_name, var_idx) mapping is built lazily and cached to
-$AGENTBOARD_DATA_PATH/scienceworld/goal_map.json on first run (~2 min).
+Each test.jsonl record carries additional_info.{env_name, var}, which maps directly
+to scienceworld's env.load(env_name, var) — the authoritative, version-stable link.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import random
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
 
@@ -31,37 +30,6 @@ _AGENTBOARD_DEFAULT = os.environ.get(
 # flags (incl. teleportAction), letting the agent teleport and trivializing navigation —
 # diverging from the AgentBoard baseline.
 _SIMPLIFICATION_STR = "selfWateringFlowerPots,openContainers,openDoors,noElectricalAction"
-
-
-def _build_goal_map(data_dir: str) -> Dict[str, Tuple[str, int]]:
-    """Build goal_text → (task_name, var_idx) by iterating all ScienceWorld test variations.
-
-    Results are cached to goal_map.json in data_dir. This may take ~2 minutes on first run.
-    """
-    cache_path = os.path.join(data_dir, "goal_map.json")
-    if os.path.exists(cache_path):
-        with open(cache_path) as f:
-            raw = json.load(f)
-        return {k: tuple(v) for k, v in raw.items()}
-
-    from scienceworld import ScienceWorldEnv
-
-    goal_map: Dict[str, Tuple[str, int]] = {}
-    dummy = ScienceWorldEnv("boil", envStepLimit=1)
-    task_names = dummy.get_task_names()
-
-    for task_name in task_names:
-        env = ScienceWorldEnv(task_name, envStepLimit=1)
-        for var_idx in env.get_variations_test():
-            env.load(task_name, var_idx)
-            env.reset()
-            goal = env.get_task_description().strip()
-            if goal not in goal_map:
-                goal_map[goal] = (task_name, var_idx)
-
-    with open(cache_path, "w") as f:
-        json.dump(goal_map, f, indent=2)
-    return goal_map
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,25 +165,24 @@ class ScienceWorldDataset(MultiTurnDataset):
                 "Set AGENTBOARD_DATA_PATH or pass data_path= to ScienceWorldDataset."
             )
 
-        data_dir = os.path.join(self._agentboard_root, "scienceworld")
-        goal_map = _build_goal_map(data_dir)
-
         instances = []
         with open(self.data_path) as f:
             for line in f:
                 rec = json.loads(line)
                 goal_text = rec["goal"].strip()
 
-                env_info = goal_map.get(goal_text)
-                if env_info is None:
-                    for key, val in goal_map.items():
-                        if goal_text[:60] in key or key[:60] in goal_text:
-                            env_info = val
-                            break
-                if env_info is None:
+                # Map directly via the AgentBoard-recorded (env_name, var) instead of
+                # matching goal text against the installed sim. The old goal-text lookup
+                # silently dropped 55/90 tasks because scienceworld==1.2.3's descriptions
+                # drift from test.jsonl, and the fuzzy [:60] match collided on tasks that
+                # share an identical goal string. additional_info is authoritative and
+                # version-stable — env.load(env_name, var) reproduces the exact goal text.
+                ai = rec.get("additional_info", {})
+                task_name = ai.get("env_name")
+                var_idx = ai.get("var")
+                if task_name is None or var_idx is None:
                     continue
 
-                task_name, var_idx = env_info
                 subgoals = rec["subgoals"]
                 if isinstance(subgoals, str):
                     subgoals = [s.strip() for s in subgoals.split("\n") if s.strip()]
