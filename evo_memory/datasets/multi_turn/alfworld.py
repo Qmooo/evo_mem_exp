@@ -8,7 +8,7 @@ Game files must be downloaded:
 
 Data path (set via env var or pass data_path=):
     AGENTBOARD_DATA_PATH=/path/to/agentboard/data
-    → game files at $AGENTBOARD_DATA_PATH/alfworld/json_2.1.1/valid_seen/
+    → game files at $AGENTBOARD_DATA_PATH/alfworld/json_2.1.1/{valid_seen,valid_unseen,valid_train,train}/
     → JSONL  at     $AGENTBOARD_DATA_PATH/alfworld/test.jsonl
 """
 
@@ -16,15 +16,8 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import re
-import yaml
-from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
-
-import alfworld
-import alfworld.agents.environment
-import jsonlines
 
 from ..base import DatasetSplit, MultiTurnDataset, TaskInstance
 
@@ -33,52 +26,25 @@ _AGENTBOARD_DEFAULT = os.environ.get(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "data", "agentboard", "data"),
 )
 
-# folder prefix → canonical task type key
-_FOLDER_TO_TYPE = {
-    "pick_and_place_simple":          "simple",
-    "look_at_obj_in_light":           "look_at",
-    "pick_clean_then_place_in_recep": "clean",
-    "pick_heat_then_place_in_recep":  "heat",
-    "pick_cool_then_place_in_recep":  "cool",
-    "pick_two_obj_and_place":         "pick_two",
-}
+# AgentBoard identifies each test.jsonl task with its exact game via
+# additional_info.description (== "<task_folder>/<trial>"); the batch AlfWorld
+# class keys labeled_data by it and looks it up at reset() through
+# info['extra.gamefile']. We resolve the same game deterministically across all
+# json_2.1.1 splits, because AgentBoard's referenced scenes are spread over
+# valid_seen / valid_unseen / valid_train / train (not valid_seen alone).
+_SPLITS = ("valid_seen", "valid_unseen", "valid_train", "train")
 
 
-def _goal_to_type_and_obj(goal: str) -> Tuple[str, str]:
-    """Parse (type_key, object_lower) from an AlfWorld goal string."""
-    g = goal.lower().strip().rstrip(".")
-
-    m = re.match(r"look at (?:an? )?(.+?) under", g)
-    if m:
-        return "look_at", m.group(1).strip()
-    m = re.match(r"examine (?:the |an? )?(.+?) with", g)
-    if m:
-        return "look_at", m.group(1).strip()
-
-    m = re.match(r"put two (.+?) in ", g)
-    if m:
-        return "pick_two", m.group(1).strip()
-
-    if "cool" in g:
-        m = re.search(r"cool (?:some|an? )?(.+?) (?:and|in)", g)
-        if m:
-            return "cool", m.group(1).strip()
-
-    if "heat" in g or "hot" in g:
-        m = re.search(r"(?:heat (?:the|some|an? )?|put a hot )(.+?) (?:and|in|using|with)", g)
-        if m:
-            return "heat", m.group(1).strip()
-
-    if "clean" in g:
-        m = re.search(r"(?:clean (?:some|the|an? )?|put a clean )(.+?) (?:and|in|with|on)", g)
-        if m:
-            return "clean", m.group(1).strip()
-
-    m = re.match(r"put (?:some |an? |a )?(.+?) (?:on|in) ", g)
-    if m:
-        return "simple", m.group(1).strip()
-
-    return "simple", ""
+def _resolve_game_file(json_root: str, description: str) -> Optional[str]:
+    """Resolve the exact game.tw-pddl for an AgentBoard `description`
+    ('<task_folder>/<trial>'), searching every json_2.1.1 split. Returns None
+    if no split contains the referenced game."""
+    rel = os.path.join(*description.split("/"))
+    for split in _SPLITS:
+        gf = os.path.join(json_root, split, rel, "game.tw-pddl")
+        if os.path.exists(gf):
+            return gf
+    return None
 
 
 def _parse_subgoal_patterns(raw: List[str]) -> List[str]:
@@ -91,143 +57,16 @@ def _parse_subgoal_patterns(raw: List[str]) -> List[str]:
     return patterns
 
 
-def _collect_game_files(valid_seen_dir: str) -> Tuple[Dict[Tuple[str, str], List[str]], Dict[str, List[str]]]:
-    """Scan valid_seen/ and return {(type_key, object_lower): [game_file_path]} dict."""
-    index: Dict[Tuple[str, str], List[str]] = defaultdict(list)
-    type_only: Dict[str, List[str]] = defaultdict(list)
-
-    for task_folder in sorted(os.listdir(valid_seen_dir)):
-        task_path = os.path.join(valid_seen_dir, task_folder)
-        if not os.path.isdir(task_path):
-            continue
-        type_key = None
-        obj_lower = ""
-        for prefix, key in _FOLDER_TO_TYPE.items():
-            if task_folder.startswith(prefix):
-                type_key = key
-                after_prefix = task_folder[len(prefix) + 1:]
-                obj_part = after_prefix.split("-")[0]
-                obj_lower = obj_part.lower()
-                break
-        if type_key is None:
-            continue
-
-        for trial in os.listdir(task_path):
-            trial_path = os.path.join(task_path, trial)
-            game_file = os.path.join(trial_path, "game.tw-pddl")
-            if os.path.exists(game_file):
-                index[(type_key, obj_lower)].append(game_file)
-                type_only[type_key].append(game_file)
-                break
-
-    return index, type_only
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# AgentBoard AlfWorld environment class (copied; registry/pdb stripped)
+# Per-task environment (one textworld game per task, for EvoMemMultiEnvironment)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AlfWorld:
-    def __init__(self,
-                 split,
-                 base_config,
-                 batch_size,
-                 seed,
-                 label_path
-                 ):
-        with open(base_config) as reader:
-            config = yaml.safe_load(reader)
-        env = getattr(alfworld.agents.environment, config["env"]["type"])(config, train_eval=split)
-        env.game_files.sort()
-        self.env = env.init_env(batch_size)
-        self.valid_actions = []
-        self.init_obs = ''
-        self.isdone = False
-        self.env_ob = self.init_obs
-        self.finished_sub_goal = []
-        self.labeled_data = {}
-        self.sub_goal = []
-        with open(label_path, 'r+', encoding='utf-8') as f:
-            for item in jsonlines.Reader(f):
-                self.labeled_data[item["additional_info"]['description']] = item
-        random.seed(seed)
-        self.cur_task_name = ""
-        self.reward = 0.
-
-    def reset(self):
-        ob, info = self.env.reset()
-        self.valid_actions = info["admissible_commands"][0]
-        self.init_obs = ('\n'.join(ob[0].split('\n\n')[1:])).split('\n')[0]
-        self.goal = ('\n'.join(ob[0].split('\n\n')[1:])).split('\n')[1]
-        self.env_ob = self.init_obs
-        self.cur_task_name = '/'.join(info['extra.gamefile'][0].split('/')[-3:-1])
-        self.sub_goal = self.labeled_data[self.cur_task_name]["subgoals"]
-        self.difficulty = self.labeled_data[self.cur_task_name]["difficulty"]
-        self.finished_sub_goal = [0 for i in range(len(self.sub_goal) + 1)]
-        self.reward = 0
-        self.isdone = False
-        return ob, info
-
-    def step(self, action):
-        info = None
-        done = self.isdone
-        if action.endswith('.'):
-            action = action[:-1]
-        if action == "look":
-            observation, _, done, info = self.env.step([action])
-            observation = [self.env_ob]
-            done = done[0]
-        elif action == "check valid actions":
-            valid_actions = ", ".join(self.valid_actions)
-            observation = [f"Choose an action from these valid actions: {valid_actions}"]
-        else:
-            observation, _, done, info = self.env.step([action])
-            done = done[0]
-        if "go to" in action or "open" in action:
-            if "Nothing happens" not in observation[0]:
-                self.env_ob = observation[0]
-        if info:
-            self.valid_actions = info["admissible_commands"][0]
-        observation = self._process_ob(observation[0])
-        self.isdone = done
-        self._check_temperature_string(s=observation, selected_obs=self.sub_goal)
-        self.reward = self._get_reward()
-        return observation, self.reward, done, info
-
-    def _process_ob(self, ob):
-        if ob.startswith('You arrive at loc '):
-            ob = ob[ob.find('. ') + 2:]
-        return ob
-
-    def _get_reward(self):
-        if self.isdone:
-            return 1.0
-        else:
-            return sum(self.finished_sub_goal) * 1.0 / len(self.finished_sub_goal)
-
-    def _check_temperature_string(self, s, selected_obs):
-        for i, pattern in enumerate(selected_obs):
-            match = re.search(pattern, s)
-            if match:
-                self.finished_sub_goal[i] = 1.
-
-    def get_action_space(self):
-        if "look" not in self.valid_actions:
-            self.valid_actions.append("look")
-        if "check valid actions" not in self.valid_actions:
-            self.valid_actions.append("check valid actions")
-        return self.valid_actions
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Single-game wrapper (per-task use with EvoMemMultiEnvironment)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class SingleGameAlfWorld:
     """Single textworld game env for per-task EvoMemMultiEnvironment use.
 
-    Loads one game file directly via textworld.gym rather than the batch
-    AlfWorld class, which requires scanning directories and a global config.
+    Loads one game file directly via textworld.gym (batch_size=1) rather than
+    scanning directories through a global config, so each task runs an isolated
+    environment instance.
     """
 
     def __init__(self, game_file: str, subgoals: List[str], difficulty: str = "hard") -> None:
@@ -243,7 +82,11 @@ class SingleGameAlfWorld:
         self.init_obs = ""
         self.env_ob = ""
         self.reward = 0.0
-        self.isdone = False
+        # Terminal signal is `won` (PDDL goal met), NOT the env's `done`: with the
+        # step-limit wrapper disabled (max_episode_steps=None), the loop's step
+        # budget is owned solely by the ExecutorAgent's max_steps. `done` from
+        # textworld would fold in step-limit timeouts, so we never rely on it.
+        self.won = False
 
         request_infos = textworld.EnvInfos(won=True, admissible_commands=True, extras=["gamefile"])
         env_id = textworld.gym.register_games(
@@ -251,7 +94,7 @@ class SingleGameAlfWorld:
             request_infos,
             batch_size=1,
             asynchronous=False,
-            max_episode_steps=50,
+            max_episode_steps=None,   # no env-side step cap; ExecutorAgent.max_steps bounds the loop
             wrappers=[AlfredDemangler, AlfredInfos],
         )
         self._env = textworld.gym.make(env_id)
@@ -262,9 +105,15 @@ class SingleGameAlfWorld:
         lines = "\n".join(ob[0].split("\n\n")[1:]).split("\n")
         self.init_obs = lines[0] if lines else ob[0]
         self.env_ob = self.init_obs
-        self.finished_sub_goal = [0.0] * len(self.sub_goal)
+        # N+1 slots: indices 0..N-1 are the N intermediate subgoal regexes
+        # (see/pick/cool/heat/clean); the extra slot N stands for TERMINAL task
+        # completion, which the subgoal regexes never cover (e.g. "put a cool
+        # tomato in microwave" has subgoals see/pick/cool but none for the final
+        # placement). That slot is credited only when the env certifies a win,
+        # so progress tops out at N/(N+1) until the task is actually solved.
+        self.finished_sub_goal = [0.0] * (len(self.sub_goal) + 1)
         self.reward = 0.0
-        self.isdone = False
+        self.won = False
         return self.init_obs
 
     def _process_ob(self, ob: str) -> str:
@@ -273,9 +122,13 @@ class SingleGameAlfWorld:
         return ob
 
     def _get_reward(self) -> float:
-        # Progress purely reflects subgoal completion: fraction of subgoal regex
-        # patterns matched. No isdone→1.0 override (that hard-coded a full score on
-        # the env's done flag regardless of how many subgoals actually matched).
+        # progress = filled slots / (N+1). On a certified win the terminal slot
+        # (and, implicitly, every intermediate milestone the task required) is
+        # complete, so return the full 1.0. The override is gated on self.won
+        # (PDDL goal met) — NOT on done, which also fires on step-limit timeout
+        # and would otherwise credit an unsolved episode with a perfect score.
+        if self.won:
+            return 1.0
         denom = len(self.finished_sub_goal)
         return sum(self.finished_sub_goal) / denom if denom else 0.0
 
@@ -296,16 +149,36 @@ class SingleGameAlfWorld:
         if action.endswith("."):
             action = action[:-1]
 
+        # The `done` we return is self.won (task solved). AlfWorld's PDDL games
+        # never enter a "lost" state, so won is the only terminal condition; the
+        # env's own `done` flag is deliberately ignored (see __init__).
         if action == "check valid actions":
+            # Meta-query: does not step the real env, so won is unchanged.
             valid = ", ".join(self.get_action_space())
             obs = f"Choose an action from these valid actions: {valid}"
-            return obs, self.reward, self.isdone, {"success": self.isdone, "progress": self.reward}
+            return obs, self.reward, self.won, {"success": self.won, "progress": self.reward}
 
-        observation, _, done_list, info = self._env.step([action])
-        done = done_list[0]
+        if action == "look":
+            # Step the real env (consumes a turn, refreshes info) but override the
+            # observation with the cached current-room description (env_ob):
+            # textworld's own `look` after reset or a move returns an empty "you
+            # see nothing", losing the room state.
+            _, _, _, info = self._env.step([action])
+            if info and "admissible_commands" in info:
+                self.valid_actions = info["admissible_commands"][0]
+            if info and "won" in info:
+                self.won = bool(info["won"][0])
+            obs = self._process_ob(self.env_ob)
+            self._check_subgoals(obs)
+            self.reward = self._get_reward()
+            return obs, self.reward, self.won, {"success": self.won, "progress": self.reward}
+
+        observation, _, _, info = self._env.step([action])
 
         if info and "admissible_commands" in info:
             self.valid_actions = info["admissible_commands"][0]
+        if info and "won" in info:
+            self.won = bool(info["won"][0])
 
         obs = self._process_ob(observation[0])
         if "go to" in action or "open" in action:
@@ -313,10 +186,9 @@ class SingleGameAlfWorld:
                 self.env_ob = obs
 
         self._check_subgoals(obs)
-        self.isdone = done
         self.reward = self._get_reward()
 
-        return obs, self.reward, done, {"success": done, "progress": self.reward}
+        return obs, self.reward, self.won, {"success": self.won, "progress": self.reward}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -351,39 +223,26 @@ class AlfWorldDataset(MultiTurnDataset):
                 "Set AGENTBOARD_DATA_PATH or pass data_path= to AlfWorldDataset."
             )
 
-        valid_seen_dir = os.path.join(
-            self._agentboard_root, "alfworld", "json_2.1.1", "valid_seen"
-        )
-        if not os.path.isdir(valid_seen_dir):
+        json_root = os.path.join(self._agentboard_root, "alfworld", "json_2.1.1")
+        if not os.path.isdir(json_root):
             raise FileNotFoundError(
-                f"AlfWorld game files not found at {valid_seen_dir!r}. "
+                f"AlfWorld game files not found at {json_root!r}. "
                 "Run: alfworld-download --data-dir $AGENTBOARD_DATA_PATH/alfworld"
             )
 
-        obj_index, type_index = _collect_game_files(valid_seen_dir)
-        obj_cursors: Dict[Tuple[str, str], int] = defaultdict(int)
-        type_cursors: Dict[str, int] = defaultdict(int)
-
         instances = []
+        missing: List[str] = []
         with open(self.data_path) as f:
             for line in f:
                 rec = json.loads(line)
                 goal = rec["goal"]
-                type_key, obj_lower = _goal_to_type_and_obj(goal)
 
-                key = (type_key, obj_lower)
-                if obj_index.get(key):
-                    available = obj_index[key]
-                    idx = obj_cursors[key] % len(available)
-                    obj_cursors[key] += 1
-                    game_file = available[idx]
-                else:
-                    available = type_index.get(type_key, type_index.get("simple", []))
-                    idx = type_cursors[type_key] % max(len(available), 1)
-                    type_cursors[type_key] += 1
-                    game_file = available[idx] if available else None
-
+                # Deterministic AgentBoard mapping: the exact game is named by
+                # additional_info.description, NOT re-derived from the goal text.
+                description = rec["additional_info"]["description"]
+                game_file = _resolve_game_file(json_root, description)
                 if game_file is None:
+                    missing.append(description)
                     continue
 
                 subgoals_raw = rec["subgoals"]
@@ -398,17 +257,24 @@ class AlfWorldDataset(MultiTurnDataset):
                     metadata={
                         "id": rec["id"],
                         "game_file": game_file,
-                        "type_key": type_key,
+                        "description": description,
                         "subgoals": subgoal_patterns,
                         "difficulty": rec.get("difficulty", "hard"),
                     },
                     difficulty=rec.get("difficulty", "hard"),
                     domain="household",
                 ))
+
+        if missing:
+            raise FileNotFoundError(
+                f"{len(missing)} AlfWorld game(s) referenced by test.jsonl were not found "
+                f"under {json_root!r} (e.g. {missing[0]!r}). Download the full game set: "
+                "alfworld-download --data-dir $AGENTBOARD_DATA_PATH/alfworld"
+            )
         return instances
 
-    def get_environment(self, task_instance: TaskInstance) -> SingleGameAlfWorld:
-        return SingleGameAlfWorld(
+    def get_environment(self, task_instance: TaskInstance) -> AlfWorld:
+        return AlfWorld(
             game_file=task_instance.metadata["game_file"],
             subgoals=task_instance.metadata.get("subgoals", []),
             difficulty=task_instance.metadata.get("difficulty", "hard"),
@@ -417,13 +283,15 @@ class AlfWorldDataset(MultiTurnDataset):
     def get_environment_info(self, task_instance: TaskInstance) -> str:
         return (
             "You are in a household environment. Issue plain text commands like:\n"
-            "  go to [location]\n"
-            "  take [object] from [location]\n"
-            "  put [object] in/on [receptacle]\n"
-            "  open/close [object]\n"
-            "  heat [object] with [appliance] / clean [object] with [appliance]\n"
+            "  go to [receptacle]\n"
+            "  take [object] from [receptacle]\n"
+            "  move [object] to [receptacle]        (place a held object; NOTE: 'put ... in/on' is NOT accepted)\n"
+            "  open [receptacle] / close [receptacle]\n"
+            "  use [object]                          (operate/turn on, e.g. 'use desklamp 1' to light it)\n"
+            "  heat [object] with [appliance] / cool [object] with [appliance] / clean [object] with [appliance]\n"
+            "  examine [object/receptacle]\n"
             "  look / inventory\n"
-            "Special commands: 'look' (re-show current room), 'check valid actions'.\n"
+            "Special commands: 'look' (re-show current room), 'check valid actions' (list the exact actions valid right now).\n"
             "Observations list objects with numeric IDs (e.g. 'bowl 2'). Include the ID when referring to them."
         )
 
