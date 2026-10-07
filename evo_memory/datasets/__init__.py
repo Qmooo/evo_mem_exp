@@ -7,12 +7,17 @@ from .single_turn import (
     AIMEDataset,
     ToolBenchDataset,
 )
-from .multi_turn import (
-    AlfWorldDataset,
-    BabyAIDataset,
-    PDDLDataset,
-    ScienceWorldDataset,
-)
+
+# Multi-turn loaders need the multi_turn extra (gymnasium, alfworld, ...), so they
+# are imported on first access; single-turn use works without those packages.
+_MULTI_TURN = ("AlfWorldDataset", "BabyAIDataset", "PDDLDataset", "ScienceWorldDataset")
+
+
+def __getattr__(name):
+    if name in _MULTI_TURN:
+        from . import multi_turn
+        return getattr(multi_turn, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "BaseDataset",

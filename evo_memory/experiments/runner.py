@@ -31,12 +31,6 @@ from ..datasets.single_turn import (
     AIMEDataset,
     ToolBenchDataset,
 )
-from ..datasets.multi_turn import (
-    AlfWorldDataset,
-    BabyAIDataset,
-    PDDLDataset,
-    ScienceWorldDataset,
-)
 from ..evaluation import Evaluator, EvaluationConfig, StreamResult, save_results
 from ..llm.base import BaseLLM
 from ..llm.openai_llm import OpenAILLM
@@ -62,18 +56,40 @@ AGENT_REGISTRY: Dict[AgentType, Type[BaseAgent]] = {
     AgentType.AWM: AWMAgent,
 }
 
+# Multi-turn loaders need the multi_turn extra, so the registry imports them on
+# first lookup instead of at module import.
+_MULTI_TURN_DATASETS: Dict[DatasetType, str] = {
+    DatasetType.ALFWORLD: "AlfWorldDataset",
+    DatasetType.BABYAI: "BabyAIDataset",
+    DatasetType.PDDL: "PDDLDataset",
+    DatasetType.SCIENCEWORLD: "ScienceWorldDataset",
+}
+
+
+class _DatasetRegistry(dict):
+    """Dataset type -> loader class; multi-turn classes are resolved lazily."""
+
+    def __missing__(self, key):
+        from ..datasets import multi_turn
+        cls = getattr(multi_turn, _MULTI_TURN_DATASETS[key])
+        self[key] = cls
+        return cls
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
 # Dataset registry
-DATASET_REGISTRY: Dict[DatasetType, Type[BaseDataset]] = {
+DATASET_REGISTRY: Dict[DatasetType, Type[BaseDataset]] = _DatasetRegistry({
     DatasetType.MMLU_PRO: MMLUProDataset,
     DatasetType.GPQA: GPQADataset,
     DatasetType.AIME_24: AIMEDataset,
     DatasetType.AIME_25: AIMEDataset,
     DatasetType.TOOLBENCH: ToolBenchDataset,
-    DatasetType.ALFWORLD: AlfWorldDataset,
-    DatasetType.BABYAI: BabyAIDataset,
-    DatasetType.PDDL: PDDLDataset,
-    DatasetType.SCIENCEWORLD: ScienceWorldDataset,
-}
+})
 
 # LLM backend registry
 LLM_REGISTRY: Dict[LLMBackend, Type[BaseLLM]] = {

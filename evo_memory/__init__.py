@@ -57,11 +57,6 @@ from .datasets import (
     GPQADataset,
     AIMEDataset,
     ToolBenchDataset,
-    # Multi-turn
-    AlfWorldDataset,
-    BabyAIDataset,
-    PDDLDataset,
-    ScienceWorldDataset,
 )
 
 # Evaluation
@@ -132,3 +127,11 @@ __all__ = [
     "ExperimentRunner",
     "run_quick_experiment",
 ]
+
+
+def __getattr__(name):
+    # Multi-turn dataset loaders are imported on first access (see datasets/__init__.py).
+    from . import datasets
+    if name in datasets._MULTI_TURN:
+        return getattr(datasets, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
