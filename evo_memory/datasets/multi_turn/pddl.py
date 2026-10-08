@@ -249,6 +249,8 @@ class PDDL:
         try:
             tokens = nltk.word_tokenize(text)
         except LookupError:
+            # nltk >= 3.8.2 tokenizes with punkt_tab; older versions use punkt.
+            nltk.download('punkt_tab', quiet=True)
             nltk.download('punkt', quiet=True)
             tokens = nltk.word_tokenize(text)
         predicate_name = None
